@@ -237,9 +237,19 @@ class TaskPausesRepo:
         row = self.conn.execute("SELECT * FROM task_pauses WHERE id = ?", (pause_id,)).fetchone()
         return row_to_dict(row) if row else {}
 
-    def list(self, *, task_id: int) -> list[dict[str, Any]]:
-        rows = self.conn.execute("SELECT * FROM task_pauses WHERE task_id = ?", (task_id,)).fetchall()
+    def list(self, *, task_id: int | None) -> list[dict[str, Any]]:
+        if task_id is None:
+            rows = self.conn.execute("SELECT * FROM task_pauses").fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM task_pauses WHERE task_id = ?", (task_id,)).fetchall()
         return [row_to_dict(r) for r in rows]
+
+    def get_open_pause(self, task_id: int) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT * FROM task_pauses WHERE task_id = ? AND date_end IS NULL ORDER BY date_start DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return row_to_dict(row) if row else {}
 
 
 class ActionLogRepo:
@@ -261,3 +271,7 @@ class ActionLogRepo:
         query += " ORDER BY timestamp ASC"
         rows = self.conn.execute(query, params).fetchall()
         return [row_to_dict(r) for r in rows]
+
+    def get(self, log_id: int) -> dict[str, Any]:
+        row = self.conn.execute("SELECT * FROM action_log WHERE id = ?", (log_id,)).fetchone()
+        return row_to_dict(row) if row else {}

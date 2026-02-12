@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import date
 import sqlite3
 
 from .logging import format_changes, log_action
@@ -29,7 +30,16 @@ class Services:
     def _check(self, action: str) -> None:
         check_permission(self.actor_user["role"], action)
 
-    def _log(self, *, entity_type: str, entity_id: int, action_type: str, old: dict[str, Any] | None, new: dict[str, Any] | None) -> None:
+    def _log(
+        self,
+        *,
+        entity_type: str,
+        entity_id: int,
+        action_type: str,
+        old: dict[str, Any] | None,
+        new: dict[str, Any] | None,
+        comment: str | None = None,
+    ) -> None:
         old_text, new_text = format_changes(old, new)
         log_action(
             self.conn,
@@ -39,6 +49,7 @@ class Services:
             action_type=action_type,
             old_value=old_text,
             new_value=new_text,
+            comment=comment,
         )
 
     def _action_type_for_update(self, updates: dict[str, Any]) -> str:
@@ -99,6 +110,10 @@ class Services:
         self._check("pockets.list")
         return self.pockets.list(status=status)
 
+    def get_pocket(self, pocket_id: int) -> dict[str, Any]:
+        self._check("pockets.read")
+        return self.pockets.get(pocket_id)
+
     def update_pocket(self, pocket_id: int, updates: dict[str, Any]) -> dict[str, Any]:
         self._check("pockets.update")
         current = self.pockets.get(pocket_id)
@@ -120,6 +135,10 @@ class Services:
         self._check("projects.list")
         return self.projects.list(pocket_id=pocket_id, status=status)
 
+    def get_project(self, project_id: int) -> dict[str, Any]:
+        self._check("projects.read")
+        return self.projects.get(project_id)
+
     def update_project(self, project_id: int, updates: dict[str, Any]) -> dict[str, Any]:
         self._check("projects.update")
         current = self.projects.get(project_id)
@@ -132,6 +151,10 @@ class Services:
     # Tasks
     def create_task(self, data: dict[str, Any]) -> dict[str, Any]:
         self._check("tasks.create")
+        data.setdefault("status", "Создана")
+        data.setdefault("date_created", date.today().isoformat())
+        data.setdefault("date_start_work", None)
+        data.setdefault("date_done", None)
         if data.get("status") != "Создана":
             raise ValueError("New task must start with status 'Создана'")
         result = self.tasks.create(actor_user_id=self.actor_user["id"], data=data)
@@ -142,6 +165,10 @@ class Services:
     def list_tasks(self, *, project_id: int | None = None, status: str | None = None, executor_user_id: int | None = None) -> list[dict[str, Any]]:
         self._check("tasks.list")
         return self.tasks.list(project_id=project_id, status=status, executor_user_id=executor_user_id)
+
+    def get_task(self, task_id: int) -> dict[str, Any]:
+        self._check("tasks.read")
+        return self.tasks.get(task_id)
 
     def update_task(self, task_id: int, updates: dict[str, Any]) -> dict[str, Any]:
         self._check("tasks.update")
@@ -173,14 +200,89 @@ class Services:
             self._log(entity_type="task", entity_id=result["task_id"], action_type="pause_end", old=current, new=result)
         return result
 
-    def list_task_pauses(self, task_id: int) -> list[dict[str, Any]]:
+    def list_task_pauses(self, task_id: int | None = None) -> list[dict[str, Any]]:
         self._check("task_pauses.list")
         return self.task_pauses.list(task_id=task_id)
+
+    def get_task_pause(self, pause_id: int) -> dict[str, Any]:
+        self._check("task_pauses.read")
+        return self.task_pauses.get(pause_id)
 
     # Logs
     def list_action_log(self, *, entity_type: str | None = None, entity_id: int | None = None) -> list[dict[str, Any]]:
         self._check("action_log.list")
         return self.action_log.list(entity_type=entity_type, entity_id=entity_id)
+
+    def get_action_log(self, log_id: int) -> dict[str, Any]:
+        self._check("action_log.read")
+        return self.action_log.get(log_id)
+
+    # Task status actions
+    def start_task(self, task_id: int, *, comment: str | None = None) -> dict[str, Any]:
+        self._check("tasks.update")
+        current = self.tasks.get(task_id)
+        if not current:
+            return {}
+        self._validate_task_status_update(current.get("status"), "В работе")
+        updates = {"status": "В работе"}
+        if not current.get("date_start_work"):
+            updates["date_start_work"] = date.today().isoformat()
+        result = self.tasks.update(actor_user_id=self.actor_user["id"], task_id=task_id, updates=updates)
+        if result:
+            self._log(entity_type="task", entity_id=task_id, action_type="update_status", old=current, new=result, comment=comment)
+        return result
+
+    def pause_task(self, task_id: int, *, comment: str | None = None) -> dict[str, Any]:
+        self._check("tasks.update")
+        self._check("task_pauses.create")
+        current = self.tasks.get(task_id)
+        if not current:
+            return {}
+        self._validate_task_status_update(current.get("status"), "Приостановлена")
+        pause_data = {
+            "task_id": task_id,
+            "date_start": date.today().isoformat(),
+            "date_end": None,
+        }
+        self.task_pauses.create(actor_user_id=self.actor_user["id"], data=pause_data)
+        updates = {"status": "Приостановлена"}
+        result = self.tasks.update(actor_user_id=self.actor_user["id"], task_id=task_id, updates=updates)
+        if result:
+            self._log(entity_type="task", entity_id=task_id, action_type="pause_start", old=current, new=result, comment=comment)
+        return result
+
+    def resume_task(self, task_id: int, *, comment: str | None = None) -> dict[str, Any]:
+        self._check("tasks.update")
+        self._check("task_pauses.create")
+        current = self.tasks.get(task_id)
+        if not current:
+            return {}
+        self._validate_task_status_update(current.get("status"), "В работе")
+        pause = self.task_pauses.get_open_pause(task_id)
+        if not pause:
+            raise ValueError("No active pause for task")
+        self.task_pauses.update(
+            actor_user_id=self.actor_user["id"],
+            pause_id=pause["id"],
+            updates={"date_end": date.today().isoformat()},
+        )
+        updates = {"status": "В работе"}
+        result = self.tasks.update(actor_user_id=self.actor_user["id"], task_id=task_id, updates=updates)
+        if result:
+            self._log(entity_type="task", entity_id=task_id, action_type="pause_end", old=current, new=result, comment=comment)
+        return result
+
+    def complete_task(self, task_id: int, *, comment: str | None = None) -> dict[str, Any]:
+        self._check("tasks.update")
+        current = self.tasks.get(task_id)
+        if not current:
+            return {}
+        self._validate_task_status_update(current.get("status"), "Завершена")
+        updates = {"status": "Завершена", "date_done": date.today().isoformat()}
+        result = self.tasks.update(actor_user_id=self.actor_user["id"], task_id=task_id, updates=updates)
+        if result:
+            self._log(entity_type="task", entity_id=task_id, action_type="close", old=current, new=result, comment=comment)
+        return result
 
     # WIP
     def wip_for_task(self, task_id: int) -> int:

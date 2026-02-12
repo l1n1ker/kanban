@@ -19,7 +19,7 @@ class Pocket:
     id: int | None
     name: str
     date_start: str
-    date_end: str
+    date_end: str | None
     status: str
     owner_user_id: int
     department: str
@@ -32,7 +32,7 @@ class Project:
     pocket_id: int
     status: str
     date_start: str
-    date_end: str
+    date_end: str | None
     curator_business_user_id: int
     curator_it_user_id: int
 
@@ -56,7 +56,7 @@ class TaskPause:
     id: int | None
     task_id: int
     date_start: str
-    date_end: str
+    date_end: str | None
 
 
 @dataclass

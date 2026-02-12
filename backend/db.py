@@ -47,7 +47,7 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             date_start TEXT NOT NULL,
-            date_end TEXT NOT NULL,
+            date_end TEXT,
             status TEXT NOT NULL,
             owner_user_id INTEGER NOT NULL,
             department TEXT NOT NULL,
@@ -61,7 +61,7 @@ def init_db() -> None:
             pocket_id INTEGER NOT NULL,
             status TEXT NOT NULL,
             date_start TEXT NOT NULL,
-            date_end TEXT NOT NULL,
+            date_end TEXT,
             curator_business_user_id INTEGER NOT NULL,
             curator_it_user_id INTEGER NOT NULL,
             FOREIGN KEY(pocket_id) REFERENCES pockets(id),
@@ -90,7 +90,7 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id INTEGER NOT NULL,
             date_start TEXT NOT NULL,
-            date_end TEXT NOT NULL,
+            date_end TEXT,
             FOREIGN KEY(task_id) REFERENCES tasks(id)
         );
 
