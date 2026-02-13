@@ -12,12 +12,14 @@ class UserCreate(BaseModel):
     full_name: str
     role: Literal["admin", "head", "teamlead", "curator", "executor"]
     is_active: bool = True
+    status_id: Optional[int] = None
 
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     role: Optional[Literal["admin", "head", "teamlead", "curator", "executor"]] = None
     is_active: Optional[bool] = None
+    status_id: Optional[int] = None
 
 
 class UserOut(BaseModel):
@@ -26,6 +28,8 @@ class UserOut(BaseModel):
     full_name: str
     role: Literal["admin", "head", "teamlead", "curator", "executor"]
     is_active: bool
+    status_id: Optional[int] = None
+    status_name: Optional[str] = None
 
 
 class PocketCreate(BaseModel):
@@ -33,6 +37,7 @@ class PocketCreate(BaseModel):
     date_start: date
     date_end: Optional[date] = None
     status: Literal["Запущен", "Завершён"]
+    status_id: Optional[int] = None
     owner_user_id: int
     department: str
 
@@ -42,6 +47,7 @@ class PocketUpdate(BaseModel):
     date_start: Optional[date] = None
     date_end: Optional[date] = None
     status: Optional[Literal["Запущен", "Завершён"]] = None
+    status_id: Optional[int] = None
     owner_user_id: Optional[int] = None
     department: Optional[str] = None
 
@@ -52,6 +58,8 @@ class PocketOut(BaseModel):
     date_start: date
     date_end: Optional[date]
     status: Literal["Запущен", "Завершён"]
+    status_id: Optional[int] = None
+    status_name: Optional[str] = None
     owner_user_id: int
     department: str
 
@@ -61,6 +69,7 @@ class ProjectCreate(BaseModel):
     project_code: Optional[str] = None
     pocket_id: int
     status: Literal["Активен", "Завершён"]
+    status_id: Optional[int] = None
     date_start: date
     date_end: Optional[date] = None
     curator_business_user_id: int
@@ -72,6 +81,7 @@ class ProjectUpdate(BaseModel):
     project_code: Optional[str] = None
     pocket_id: Optional[int] = None
     status: Optional[Literal["Активен", "Завершён"]] = None
+    status_id: Optional[int] = None
     date_start: Optional[date] = None
     date_end: Optional[date] = None
     curator_business_user_id: Optional[int] = None
@@ -84,6 +94,8 @@ class ProjectOut(BaseModel):
     project_code: Optional[str]
     pocket_id: int
     status: Literal["Активен", "Завершён"]
+    status_id: Optional[int] = None
+    status_name: Optional[str] = None
     date_start: date
     date_end: Optional[date]
     curator_business_user_id: int
@@ -94,12 +106,14 @@ class TaskCreate(BaseModel):
     project_id: int
     description: str
     customer: str
+    status_id: Optional[int] = None
     executor_user_id: Optional[int] = None
     code_link: Optional[str] = None
 
 
 class TaskUpdate(BaseModel):
     project_id: Optional[int] = None
+    status_id: Optional[int] = None
     description: Optional[str] = None
     customer: Optional[str] = None
     executor_user_id: Optional[int] = None
@@ -111,6 +125,8 @@ class TaskOut(BaseModel):
     project_id: int
     description: str
     status: Literal["Создана", "В работе", "Приостановлена", "Завершена"]
+    status_id: Optional[int] = None
+    status_name: Optional[str] = None
     date_created: date
     date_start_work: Optional[date]
     date_done: Optional[date]
@@ -158,3 +174,29 @@ class ActionLogOut(BaseModel):
 
 class TaskStatusAction(BaseModel):
     comment: Optional[str] = None
+
+
+class StatusCreate(BaseModel):
+    entity_type: Literal["pocket", "project", "task", "user"]
+    code: str
+    name: str
+    is_active: bool = True
+    sort_order: int = 100
+    is_system: bool = False
+
+
+class StatusUpdate(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+class StatusOut(BaseModel):
+    id: int
+    entity_type: Literal["pocket", "project", "task", "user"]
+    code: str
+    name: str
+    is_active: bool
+    sort_order: int
+    is_system: bool

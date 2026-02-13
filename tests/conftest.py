@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
     login TEXT UNIQUE NOT NULL,
     full_name TEXT NOT NULL,
     role TEXT NOT NULL,
-    is_active INTEGER NOT NULL DEFAULT 1
+    is_active INTEGER NOT NULL DEFAULT 1,
+    status_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS pockets (
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS pockets (
     date_start TEXT NOT NULL,
     date_end TEXT,
     status TEXT NOT NULL,
+    status_id INTEGER,
     owner_user_id INTEGER NOT NULL,
     department TEXT NOT NULL,
     FOREIGN KEY(owner_user_id) REFERENCES users(id),
@@ -40,6 +42,7 @@ CREATE TABLE IF NOT EXISTS projects (
     project_code TEXT,
     pocket_id INTEGER NOT NULL,
     status TEXT NOT NULL,
+    status_id INTEGER,
     date_start TEXT NOT NULL,
     date_end TEXT,
     curator_business_user_id INTEGER NOT NULL,
@@ -55,6 +58,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     description TEXT NOT NULL,
     project_id INTEGER NOT NULL,
     status TEXT NOT NULL,
+    status_id INTEGER,
     date_created TEXT NOT NULL,
     date_start_work TEXT,
     date_done TEXT,
@@ -98,6 +102,16 @@ CREATE TABLE IF NOT EXISTS project_statuses (
 CREATE TABLE IF NOT EXISTS task_statuses (
     name TEXT PRIMARY KEY
 );
+
+CREATE TABLE IF NOT EXISTS statuses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 100,
+    is_system INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -116,6 +130,21 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executemany(
         "INSERT OR IGNORE INTO task_statuses(name) VALUES (?)",
         [("Создана",), ("В работе",), ("Приостановлена",), ("Завершена",)],
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO statuses(entity_type, code, name, is_active, sort_order, is_system) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("pocket", "running", "Запущен", 1, 10, 1),
+            ("pocket", "done", "Завершён", 1, 20, 1),
+            ("project", "active", "Активен", 1, 10, 1),
+            ("project", "done", "Завершён", 1, 20, 1),
+            ("task", "created", "Создана", 1, 10, 1),
+            ("task", "in_progress", "В работе", 1, 20, 1),
+            ("task", "paused", "Приостановлена", 1, 30, 1),
+            ("task", "done", "Завершена", 1, 40, 1),
+            ("user", "active", "Активен", 1, 10, 1),
+            ("user", "inactive", "Неактивен", 1, 20, 1),
+        ],
     )
     conn.commit()
 

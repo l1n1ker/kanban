@@ -80,8 +80,29 @@ class ApiClient:
     def list_users(self) -> list[dict[str, Any]]:
         return self._request("/users")
 
+    def create_user(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("/users", method="POST", payload=payload)
+
+    def update_user(self, user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request(f"/users/{user_id}", method="PATCH", payload=payload)
+
+    def deactivate_user(self, user_id: int) -> dict[str, Any]:
+        return self._request(f"/users/{user_id}", method="DELETE")
+
     def get_session_user(self) -> dict[str, Any]:
         return self._request("/session/me")
+
+    def list_statuses(self, entity_type: str | None = None, is_active: bool | None = None) -> list[dict[str, Any]]:
+        return self._request("/statuses", query={"entity_type": entity_type, "is_active": is_active})
+
+    def create_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("/statuses", method="POST", payload=payload)
+
+    def update_status(self, status_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request(f"/statuses/{status_id}", method="PATCH", payload=payload)
+
+    def delete_status(self, status_id: int) -> None:
+        self._request(f"/statuses/{status_id}", method="DELETE")
 
     def list_pockets(self, status: str | None = None) -> list[dict[str, Any]]:
         return self._request("/pockets", query={"status": status})

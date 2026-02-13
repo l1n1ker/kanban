@@ -10,10 +10,19 @@ class UsersRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def create(self, *, actor_user_id: int, login: str, full_name: str, role: str, is_active: int = 1) -> dict[str, Any]:
+    def create(
+        self,
+        *,
+        actor_user_id: int,
+        login: str,
+        full_name: str,
+        role: str,
+        is_active: int = 1,
+        status_id: int | None = None,
+    ) -> dict[str, Any]:
         cur = self.conn.execute(
-            "INSERT INTO users (login, full_name, role, is_active) VALUES (?, ?, ?, ?)",
-            (login, full_name, role, is_active),
+            "INSERT INTO users (login, full_name, role, is_active, status_id) VALUES (?, ?, ?, ?, ?)",
+            (login, full_name, role, is_active, status_id),
         )
         return self.get(cur.lastrowid)
 
@@ -52,14 +61,15 @@ class PocketsRepo:
     def create(self, *, actor_user_id: int, data: dict[str, Any]) -> dict[str, Any]:
         cur = self.conn.execute(
             """
-            INSERT INTO pockets (name, date_start, date_end, status, owner_user_id, department)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO pockets (name, date_start, date_end, status, status_id, owner_user_id, department)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["name"],
                 data["date_start"],
                 data["date_end"],
                 data["status"],
+                data.get("status_id"),
                 data["owner_user_id"],
                 data["department"],
             ),
@@ -98,14 +108,15 @@ class ProjectsRepo:
     def create(self, *, actor_user_id: int, data: dict[str, Any]) -> dict[str, Any]:
         cur = self.conn.execute(
             """
-            INSERT INTO projects (name, project_code, pocket_id, status, date_start, date_end, curator_business_user_id, curator_it_user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO projects (name, project_code, pocket_id, status, status_id, date_start, date_end, curator_business_user_id, curator_it_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["name"],
                 data.get("project_code"),
                 data["pocket_id"],
                 data["status"],
+                data.get("status_id"),
                 data["date_start"],
                 data["date_end"],
                 data["curator_business_user_id"],
@@ -154,13 +165,14 @@ class TasksRepo:
     def create(self, *, actor_user_id: int, data: dict[str, Any]) -> dict[str, Any]:
         cur = self.conn.execute(
             """
-            INSERT INTO tasks (description, project_id, status, date_created, date_start_work, date_done, executor_user_id, customer, code_link)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks (description, project_id, status, status_id, date_created, date_start_work, date_done, executor_user_id, customer, code_link)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["description"],
                 data["project_id"],
                 data["status"],
+                data.get("status_id"),
                 data["date_created"],
                 data.get("date_start_work"),
                 data.get("date_done"),
@@ -275,4 +287,70 @@ class ActionLogRepo:
 
     def get(self, log_id: int) -> dict[str, Any]:
         row = self.conn.execute("SELECT * FROM action_log WHERE id = ?", (log_id,)).fetchone()
+        return row_to_dict(row) if row else {}
+
+
+class StatusesRepo:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def create(self, *, actor_user_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        cur = self.conn.execute(
+            """
+            INSERT INTO statuses (entity_type, code, name, is_active, sort_order, is_system)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                data["entity_type"],
+                data["code"],
+                data["name"],
+                int(data.get("is_active", 1)),
+                int(data.get("sort_order", 100)),
+                int(data.get("is_system", 0)),
+            ),
+        )
+        return self.get(cur.lastrowid)
+
+    def get(self, status_id: int) -> dict[str, Any]:
+        row = self.conn.execute("SELECT * FROM statuses WHERE id = ?", (status_id,)).fetchone()
+        return row_to_dict(row) if row else {}
+
+    def list(self, *, entity_type: str | None = None, is_active: int | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM statuses"
+        params: list[Any] = []
+        conditions = []
+        if entity_type:
+            conditions.append("entity_type = ?")
+            params.append(entity_type)
+        if is_active is not None:
+            conditions.append("is_active = ?")
+            params.append(is_active)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY entity_type, sort_order, id"
+        rows = self.conn.execute(query, params).fetchall()
+        return [row_to_dict(r) for r in rows]
+
+    def update(self, *, actor_user_id: int, status_id: int, updates: dict[str, Any]) -> dict[str, Any]:
+        current = self.get(status_id)
+        if not current:
+            return {}
+        fields = []
+        values = []
+        for key, value in updates.items():
+            fields.append(f"{key} = ?")
+            values.append(value)
+        values.append(status_id)
+        self.conn.execute(f"UPDATE statuses SET {', '.join(fields)} WHERE id = ?", values)
+        return self.get(status_id)
+
+    def delete(self, *, actor_user_id: int, status_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM statuses WHERE id = ?", (status_id,))
+        return cur.rowcount > 0
+
+    def find_by_name(self, *, entity_type: str, name: str) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT * FROM statuses WHERE entity_type = ? AND name = ? LIMIT 1",
+            (entity_type, name),
+        ).fetchone()
         return row_to_dict(row) if row else {}

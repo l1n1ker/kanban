@@ -140,6 +140,11 @@ class KanbanTkApp(Tk):
         self.task_tree: ttk.Treeview | None = None
         self.task_status_filter_var = StringVar(value="Активные")
         self.tasks_map: dict[int, dict[str, Any]] = {}
+        self.users_window: Toplevel | None = None
+        self.users_tree: ttk.Treeview | None = None
+        self.statuses_window: Toplevel | None = None
+        self.statuses_tree: ttk.Treeview | None = None
+        self.status_entity_filter_var = StringVar(value="user")
 
         self._build_menu()
         self._build_ribbon()
@@ -154,8 +159,8 @@ class KanbanTkApp(Tk):
             "Карманы": self._open_pockets_window,
             "Проекты": self._open_projects_window,
             "Задачи": self._open_tasks_window,
-            "Пользователи": self._not_implemented,
-            "Статусы": self._not_implemented,
+            "Пользователи": self._open_users_window,
+            "Статусы": self._open_statuses_window,
             "База данных": self._not_implemented,
             "Экспорт": self._not_implemented,
             "Информация о теме": self._show_theme_info,
@@ -534,7 +539,13 @@ class KanbanTkApp(Tk):
 
         if not self.pocket_users_by_id:
             try:
-                self.pocket_users_by_id = {int(u["id"]): u for u in self.api.list_users()}
+                raw_users = self.api.list_users()
+                self.pocket_users_by_id = {int(u["id"]): u for u in raw_users if int(u.get("is_active", 1)) == 1}
+                if pocket:
+                    current_owner = int(pocket.get("owner_user_id", 0))
+                    missing = next((u for u in raw_users if int(u["id"]) == current_owner), None)
+                    if missing:
+                        self.pocket_users_by_id[current_owner] = missing
             except ApiClientError as exc:
                 messagebox.showerror("Ошибка API", f"Не удалось загрузить пользователей.\n{exc}", parent=self.pocket_window)
                 return
@@ -894,8 +905,17 @@ class KanbanTkApp(Tk):
             messagebox.showwarning("Недостаточно прав", "Доступно только ролям admin/head.", parent=self.project_window)
             return
         try:
-            users = {int(u["id"]): u for u in self.api.list_users()}
+            raw_users = self.api.list_users()
+            users = {int(u["id"]): u for u in raw_users if int(u.get("is_active", 1)) == 1}
             pockets = self.api.list_pockets()
+            if project:
+                cb = int(project.get("curator_business_user_id", 0))
+                ci = int(project.get("curator_it_user_id", 0))
+                for uid in (cb, ci):
+                    if uid not in users:
+                        found = next((u for u in raw_users if int(u["id"]) == uid), None)
+                        if found:
+                            users[uid] = found
         except ApiClientError as exc:
             messagebox.showerror("Ошибка API", f"Не удалось загрузить справочники.\n{exc}", parent=self.project_window)
             return
@@ -1237,9 +1257,16 @@ class KanbanTkApp(Tk):
             messagebox.showwarning("Недостаточно прав", "Доступно только ролям curator и выше.", parent=self.task_window)
             return
         try:
-            users = {int(u["id"]): u for u in self.api.list_users()}
+            raw_users = self.api.list_users()
+            users = {int(u["id"]): u for u in raw_users if int(u.get("is_active", 1)) == 1}
             pockets = {int(p["id"]): p for p in self.api.list_pockets()}
             projects = self.api.list_projects()
+            if task and task.get("executor_user_id") is not None:
+                ex_uid = int(task["executor_user_id"])
+                if ex_uid not in users:
+                    found = next((u for u in raw_users if int(u["id"]) == ex_uid), None)
+                    if found:
+                        users[ex_uid] = found
         except ApiClientError as exc:
             messagebox.showerror("Ошибка API", f"Не удалось загрузить справочники.\n{exc}", parent=self.task_window)
             return
@@ -1431,6 +1458,432 @@ class KanbanTkApp(Tk):
             return
         self._refresh_tasks_table()
         self._load_dashboard_data()
+
+    def _is_admin(self) -> bool:
+        if not self.session_user:
+            return False
+        return str(self.session_user.get("role", "")) == "admin"
+
+    def _open_users_window(self) -> None:
+        if self.users_window and self.users_window.winfo_exists():
+            self.users_window.lift()
+            self.users_window.focus_force()
+            self._refresh_users_table()
+            return
+        w = self._create_popup(self)
+        w.title("Справочник: Пользователи")
+        w.geometry("980x560")
+        self.users_window = w
+        w.protocol("WM_DELETE_WINDOW", self._close_users_window)
+
+        top = ttk.Frame(w, padding=(10, 10))
+        top.pack(fill="x")
+        self._mk_button(top, "Обновить", self._refresh_users_table).pack(side=LEFT)
+        self._mk_button(top, "Закрыть", self._close_users_window).pack(side=RIGHT)
+
+        table = ttk.Frame(w, padding=(10, 0))
+        table.pack(fill=BOTH, expand=True)
+        cols = ("id", "login", "full_name", "role", "status_name")
+        self.users_tree = ttk.Treeview(table, columns=cols, show="headings")
+        headers = {
+            "id": "ID",
+            "login": "Логин",
+            "full_name": "ФИО",
+            "role": "Роль",
+            "status_name": "Статус",
+        }
+        for col in cols:
+            self.users_tree.heading(col, text=headers[col])
+            self.users_tree.column(col, width=120, anchor="w")
+        self.users_tree.column("id", width=70, anchor="center")
+        self.users_tree.pack(fill=BOTH, expand=True)
+        self.users_tree.bind("<Double-1>", lambda _e: self._open_user_form_edit())
+
+        actions = ttk.Frame(w, padding=(10, 10))
+        actions.pack(fill="x")
+        self._mk_button(actions, "Создать", self._open_user_form_create).pack(side=LEFT, padx=2)
+        self._mk_button(actions, "Изменить", self._open_user_form_edit).pack(side=LEFT, padx=2)
+        self._mk_button(actions, "Деактивировать", self._deactivate_selected_user).pack(side=LEFT, padx=2)
+        if not self._is_admin():
+            for child in actions.winfo_children():
+                if isinstance(child, ttk.Button):
+                    child.state(["disabled"])
+        self._refresh_users_table()
+
+    def _close_users_window(self) -> None:
+        if self.users_window and self.users_window.winfo_exists():
+            self.users_window.destroy()
+        self.users_window = None
+        self.users_tree = None
+
+    def _refresh_users_table(self) -> None:
+        if not self.users_tree:
+            return
+        try:
+            rows = self.api.list_users()
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Не удалось загрузить пользователей.\n{exc}", parent=self.users_window)
+            return
+        self.users_tree.delete(*self.users_tree.get_children())
+        autosize_rows: list[tuple[Any, ...]] = []
+        for row in rows:
+            values = (
+                row.get("id", ""),
+                row.get("login", ""),
+                row.get("full_name", ""),
+                row.get("role", ""),
+                row.get("status_name", ""),
+            )
+            autosize_rows.append(values)
+            self.users_tree.insert("", END, iid=str(row.get("id")), values=values)
+        self._autosize_tree_columns(
+            self.users_tree,
+            ("id", "login", "full_name", "role", "status_name"),
+            autosize_rows,
+            min_width=90,
+            max_width_overrides={"full_name": 260},
+        )
+
+    def _selected_user_id(self) -> int | None:
+        if not self.users_tree:
+            return None
+        selected = self.users_tree.selection()
+        if not selected:
+            return None
+        return int(selected[0])
+
+    def _open_user_form_create(self) -> None:
+        self._open_user_form(mode="create", user=None)
+
+    def _open_user_form_edit(self) -> None:
+        user_id = self._selected_user_id()
+        if user_id is None:
+            messagebox.showinfo("Пользователи", "Выберите пользователя.", parent=self.users_window)
+            return
+        try:
+            user = next((u for u in self.api.list_users() if int(u["id"]) == user_id), None)
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Не удалось загрузить пользователя.\n{exc}", parent=self.users_window)
+            return
+        if not user:
+            messagebox.showerror("Пользователи", "Пользователь не найден.", parent=self.users_window)
+            return
+        self._open_user_form(mode="edit", user=user)
+
+    def _open_user_form(self, *, mode: str, user: dict[str, Any] | None) -> None:
+        if not self._is_admin():
+            messagebox.showwarning("Недостаточно прав", "Только admin.", parent=self.users_window)
+            return
+        try:
+            statuses = self.api.list_statuses(entity_type="user", is_active=True)
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Не удалось загрузить статусы.\n{exc}", parent=self.users_window)
+            return
+        status_options = [f"{s.get('name', '')} (id:{s['id']})" for s in statuses]
+        status_label_to_id = {label: int(s["id"]) for label, s in zip(status_options, statuses)}
+
+        w = self._create_popup(self.users_window or self)
+        w.title("Новый пользователь" if mode == "create" else f"Изменить пользователя #{user.get('id') if user else ''}")
+        w.geometry("560x360")
+        frame = ttk.Frame(w, padding=(14, 14))
+        frame.pack(fill=BOTH, expand=True)
+        login_var = StringVar(value=(user.get("login", "") if user else ""))
+        full_name_var = StringVar(value=(user.get("full_name", "") if user else ""))
+        role_var = StringVar(value=(user.get("role", "executor") if user else "executor"))
+        status_var = StringVar(value=(status_options[0] if status_options else ""))
+        if user and user.get("status_id"):
+            sid = int(user["status_id"])
+            for label in status_options:
+                if f"id:{sid})" in label:
+                    status_var.set(label)
+                    break
+
+        lf = ttk.LabelFrame(frame, text="Данные пользователя", padding=(10, 10))
+        lf.pack(fill="x")
+        lf.columnconfigure(1, weight=1)
+        ttk.Label(lf, text="Логин *").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        login_entry = ttk.Entry(lf, textvariable=login_var)
+        login_entry.grid(row=0, column=1, sticky="ew", pady=4)
+        if mode == "edit":
+            login_entry.state(["disabled"])
+        ttk.Label(lf, text="ФИО *").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(lf, textvariable=full_name_var).grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Label(lf, text="Роль *").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(lf, textvariable=role_var, values=["admin", "head", "teamlead", "curator", "executor"], state="readonly").grid(row=2, column=1, sticky="ew", pady=4)
+        ttk.Label(lf, text="Статус").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(lf, textvariable=status_var, values=status_options, state="readonly").grid(row=3, column=1, sticky="ew", pady=4)
+
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=(16, 0))
+
+        def save_user() -> None:
+            login = login_var.get().strip()
+            full_name = full_name_var.get().strip()
+            if mode == "create" and not login:
+                messagebox.showerror("Валидация", "Логин обязателен.", parent=w)
+                return
+            if not full_name:
+                messagebox.showerror("Валидация", "ФИО обязательно.", parent=w)
+                return
+            sid = status_label_to_id.get(status_var.get().strip()) if status_var.get().strip() else None
+            payload = {
+                "full_name": full_name,
+                "role": role_var.get().strip(),
+                "status_id": sid,
+            }
+            try:
+                if mode == "create":
+                    create_payload = dict(payload)
+                    create_payload["login"] = login
+                    self.api.create_user(create_payload)
+                else:
+                    assert user is not None
+                    self.api.update_user(int(user["id"]), payload)
+            except ApiClientError as exc:
+                messagebox.showerror("Ошибка API", f"Сохранить пользователя не удалось.\n{exc}", parent=w)
+                return
+            w.destroy()
+            self._refresh_users_table()
+            self._load_dashboard_data()
+
+        self._mk_button(actions, "Сохранить", save_user).pack(side=LEFT)
+        self._mk_button(actions, "Отмена", w.destroy).pack(side=LEFT, padx=6)
+
+    def _deactivate_selected_user(self) -> None:
+        if not self._is_admin():
+            messagebox.showwarning("Недостаточно прав", "Только admin.", parent=self.users_window)
+            return
+        user_id = self._selected_user_id()
+        if user_id is None:
+            messagebox.showinfo("Пользователи", "Выберите пользователя.", parent=self.users_window)
+            return
+        if self.session_user and int(self.session_user.get("id", 0)) == user_id:
+            messagebox.showwarning("Ограничение", "Нельзя деактивировать текущего пользователя сессии.", parent=self.users_window)
+            return
+        if not messagebox.askyesno("Подтверждение", "Деактивировать пользователя?", parent=self.users_window):
+            return
+        try:
+            self.api.deactivate_user(user_id)
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Деактивация не удалась.\n{exc}", parent=self.users_window)
+            return
+        self._refresh_users_table()
+        self._load_dashboard_data()
+
+    def _open_statuses_window(self) -> None:
+        if self.statuses_window and self.statuses_window.winfo_exists():
+            self.statuses_window.lift()
+            self.statuses_window.focus_force()
+            self._refresh_statuses_table()
+            return
+        w = self._create_popup(self)
+        w.title("Справочник: Статусы")
+        w.geometry("980x560")
+        self.statuses_window = w
+        w.protocol("WM_DELETE_WINDOW", self._close_statuses_window)
+
+        top = ttk.Frame(w, padding=(10, 10))
+        top.pack(fill="x")
+        ttk.Label(top, text="Сущность:").pack(side=LEFT)
+        ttk.Combobox(
+            top,
+            textvariable=self.status_entity_filter_var,
+            values=["user", "pocket", "project", "task"],
+            state="readonly",
+            width=12,
+        ).pack(side=LEFT, padx=6)
+        self._mk_button(top, "Обновить", self._refresh_statuses_table).pack(side=LEFT)
+        self._mk_button(top, "Закрыть", self._close_statuses_window).pack(side=RIGHT)
+
+        table = ttk.Frame(w, padding=(10, 0))
+        table.pack(fill=BOTH, expand=True)
+        cols = ("id", "entity_type", "code", "name", "is_active", "sort_order", "is_system")
+        self.statuses_tree = ttk.Treeview(table, columns=cols, show="headings")
+        headers = {
+            "id": "ID",
+            "entity_type": "Сущность",
+            "code": "Код",
+            "name": "Наименование",
+            "is_active": "Активен",
+            "sort_order": "Порядок",
+            "is_system": "Системный",
+        }
+        for col in cols:
+            self.statuses_tree.heading(col, text=headers[col])
+            self.statuses_tree.column(col, width=120, anchor="w")
+        self.statuses_tree.column("id", width=70, anchor="center")
+        self.statuses_tree.pack(fill=BOTH, expand=True)
+        self.statuses_tree.bind("<Double-1>", lambda _e: self._open_status_form_edit())
+
+        actions = ttk.Frame(w, padding=(10, 10))
+        actions.pack(fill="x")
+        self._mk_button(actions, "Создать", self._open_status_form_create).pack(side=LEFT, padx=2)
+        self._mk_button(actions, "Изменить", self._open_status_form_edit).pack(side=LEFT, padx=2)
+        self._mk_button(actions, "Деактивировать", self._deactivate_selected_status).pack(side=LEFT, padx=2)
+        self._mk_button(actions, "Удалить", self._delete_selected_status).pack(side=LEFT, padx=2)
+        if not self._is_admin():
+            for child in actions.winfo_children():
+                if isinstance(child, ttk.Button):
+                    child.state(["disabled"])
+
+        self._refresh_statuses_table()
+
+    def _close_statuses_window(self) -> None:
+        if self.statuses_window and self.statuses_window.winfo_exists():
+            self.statuses_window.destroy()
+        self.statuses_window = None
+        self.statuses_tree = None
+
+    def _refresh_statuses_table(self) -> None:
+        if not self.statuses_tree:
+            return
+        try:
+            rows = self.api.list_statuses(entity_type=self.status_entity_filter_var.get().strip() or None, is_active=None)
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Не удалось загрузить статусы.\n{exc}", parent=self.statuses_window)
+            return
+        self.statuses_tree.delete(*self.statuses_tree.get_children())
+        autosize_rows: list[tuple[Any, ...]] = []
+        for row in rows:
+            values = (
+                row.get("id", ""),
+                row.get("entity_type", ""),
+                row.get("code", ""),
+                row.get("name", ""),
+                "Да" if int(row.get("is_active", 0)) == 1 else "Нет",
+                row.get("sort_order", ""),
+                "Да" if int(row.get("is_system", 0)) == 1 else "Нет",
+            )
+            autosize_rows.append(values)
+            self.statuses_tree.insert("", END, iid=str(row.get("id")), values=values)
+        self._autosize_tree_columns(
+            self.statuses_tree,
+            ("id", "entity_type", "code", "name", "is_active", "sort_order", "is_system"),
+            autosize_rows,
+            min_width=90,
+            max_width_overrides={"name": 240},
+        )
+
+    def _selected_status_id(self) -> int | None:
+        if not self.statuses_tree:
+            return None
+        selected = self.statuses_tree.selection()
+        if not selected:
+            return None
+        return int(selected[0])
+
+    def _open_status_form_create(self) -> None:
+        self._open_status_form(mode="create", item=None)
+
+    def _open_status_form_edit(self) -> None:
+        sid = self._selected_status_id()
+        if sid is None:
+            messagebox.showinfo("Статусы", "Выберите статус.", parent=self.statuses_window)
+            return
+        try:
+            item = next((s for s in self.api.list_statuses(is_active=None) if int(s["id"]) == sid), None)
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Не удалось загрузить статус.\n{exc}", parent=self.statuses_window)
+            return
+        if not item:
+            messagebox.showerror("Статусы", "Статус не найден.", parent=self.statuses_window)
+            return
+        self._open_status_form(mode="edit", item=item)
+
+    def _open_status_form(self, *, mode: str, item: dict[str, Any] | None) -> None:
+        if not self._is_admin():
+            messagebox.showwarning("Недостаточно прав", "Только admin.", parent=self.statuses_window)
+            return
+        w = self._create_popup(self.statuses_window or self)
+        w.title("Новый статус" if mode == "create" else f"Изменить статус #{item.get('id') if item else ''}")
+        w.geometry("560x360")
+        frame = ttk.Frame(w, padding=(14, 14))
+        frame.pack(fill=BOTH, expand=True)
+        entity_var = StringVar(value=(item.get("entity_type", self.status_entity_filter_var.get()) if item else self.status_entity_filter_var.get()))
+        code_var = StringVar(value=(item.get("code", "") if item else ""))
+        name_var = StringVar(value=(item.get("name", "") if item else ""))
+        active_var = StringVar(value=("Да" if (not item or int(item.get("is_active", 0)) == 1) else "Нет"))
+        order_var = StringVar(value=(str(item.get("sort_order", 100)) if item else "100"))
+
+        lf = ttk.LabelFrame(frame, text="Параметры статуса", padding=(10, 10))
+        lf.pack(fill="x")
+        lf.columnconfigure(1, weight=1)
+        ttk.Label(lf, text="Сущность *").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        entity_combo = ttk.Combobox(lf, textvariable=entity_var, values=["user", "pocket", "project", "task"], state="readonly")
+        entity_combo.grid(row=0, column=1, sticky="ew", pady=4)
+        if mode == "edit":
+            entity_combo.state(["disabled"])
+        ttk.Label(lf, text="Код *").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(lf, textvariable=code_var).grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Label(lf, text="Наименование *").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(lf, textvariable=name_var).grid(row=2, column=1, sticky="ew", pady=4)
+        ttk.Label(lf, text="Порядок").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(lf, textvariable=order_var).grid(row=3, column=1, sticky="ew", pady=4)
+        ttk.Label(lf, text="Активен").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(lf, textvariable=active_var, values=["Да", "Нет"], state="readonly").grid(row=4, column=1, sticky="ew", pady=4)
+
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=(16, 0))
+
+        def save_status() -> None:
+            code = code_var.get().strip()
+            name = name_var.get().strip()
+            if not code or not name:
+                messagebox.showerror("Валидация", "Код и наименование обязательны.", parent=w)
+                return
+            try:
+                sort_order = int(order_var.get().strip() or "100")
+            except ValueError:
+                messagebox.showerror("Валидация", "Порядок должен быть числом.", parent=w)
+                return
+            payload = {
+                "entity_type": entity_var.get().strip(),
+                "code": code,
+                "name": name,
+                "is_active": active_var.get() == "Да",
+                "sort_order": sort_order,
+            }
+            try:
+                if mode == "create":
+                    self.api.create_status(payload)
+                else:
+                    assert item is not None
+                    self.api.update_status(int(item["id"]), payload)
+            except ApiClientError as exc:
+                messagebox.showerror("Ошибка API", f"Сохранить статус не удалось.\n{exc}", parent=w)
+                return
+            w.destroy()
+            self._refresh_statuses_table()
+            self._load_dashboard_data()
+
+        self._mk_button(actions, "Сохранить", save_status).pack(side=LEFT)
+        self._mk_button(actions, "Отмена", w.destroy).pack(side=LEFT, padx=6)
+
+    def _deactivate_selected_status(self) -> None:
+        sid = self._selected_status_id()
+        if sid is None:
+            messagebox.showinfo("Статусы", "Выберите статус.", parent=self.statuses_window)
+            return
+        try:
+            self.api.update_status(sid, {"is_active": False})
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Не удалось деактивировать статус.\n{exc}", parent=self.statuses_window)
+            return
+        self._refresh_statuses_table()
+
+    def _delete_selected_status(self) -> None:
+        sid = self._selected_status_id()
+        if sid is None:
+            messagebox.showinfo("Статусы", "Выберите статус.", parent=self.statuses_window)
+            return
+        if not messagebox.askyesno("Подтверждение", "Удалить выбранный статус?", parent=self.statuses_window):
+            return
+        try:
+            self.api.delete_status(sid)
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Удалить статус не удалось.\n{exc}", parent=self.statuses_window)
+            return
+        self._refresh_statuses_table()
 
     def _fill_top_table(self, projects: list[dict[str, Any]]) -> None:
         self.top_tree.delete(*self.top_tree.get_children())
@@ -1929,6 +2382,8 @@ class KanbanTkApp(Tk):
         self._close_pockets_window()
         self._close_projects_window()
         self._close_tasks_window()
+        self._close_users_window()
+        self._close_statuses_window()
         for child in self.winfo_children():
             child.destroy()
         self.session_user = None
