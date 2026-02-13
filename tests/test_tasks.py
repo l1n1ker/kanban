@@ -62,6 +62,25 @@ def test_curator_can_create_task(client, db_conn: sqlite3.Connection) -> None:
     assert data["project_id"] == 200
 
 
+def test_curator_can_create_unassigned_task(client, db_conn: sqlite3.Connection) -> None:
+    _setup_task_context(db_conn)
+
+    payload = {
+        "project_id": 200,
+        "description": "Task without executor",
+        "customer": "Business",
+        "code_link": None,
+    }
+    response = client.post(
+        "/tasks",
+        json=payload,
+        headers={"X-User-Id": "10", "X-User-Role": "curator"},
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["executor_user_id"] is None
+
 def test_task_status_transition_flow(client, db_conn: sqlite3.Connection) -> None:
     _setup_task_context(db_conn)
 

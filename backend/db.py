@@ -8,7 +8,7 @@ DB_PATH = os.getenv("KANBAN_DB_PATH", "kanban.db")
 
 
 def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -27,6 +27,55 @@ def _seed_reference_data(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO task_statuses(name) VALUES (?)",
         [("Создана",), ("В работе",), ("Приостановлена",), ("Завершена",)],
     )
+
+def _tasks_executor_is_notnull(conn: sqlite3.Connection) -> bool:
+    try:
+        rows = conn.execute("PRAGMA table_info(tasks)").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        # row: cid, name, type, notnull, dflt_value, pk
+        if row[1] == "executor_user_id":
+            return bool(row[3])
+    return False
+
+
+def _migrate_tasks_executor_nullable(conn: sqlite3.Connection) -> None:
+    if not _tasks_executor_is_notnull(conn):
+        return
+    conn.executescript(
+        """
+        PRAGMA foreign_keys=off;
+        BEGIN;
+
+        CREATE TABLE tasks_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            description TEXT NOT NULL,
+            project_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            date_created TEXT NOT NULL,
+            date_start_work TEXT,
+            date_done TEXT,
+            executor_user_id INTEGER,
+            customer TEXT,
+            code_link TEXT,
+            FOREIGN KEY(project_id) REFERENCES projects(id),
+            FOREIGN KEY(executor_user_id) REFERENCES users(id),
+            FOREIGN KEY(status) REFERENCES task_statuses(name)
+        );
+
+        INSERT INTO tasks_new (id, description, project_id, status, date_created, date_start_work, date_done, executor_user_id, customer, code_link)
+        SELECT id, description, project_id, status, date_created, date_start_work, date_done, executor_user_id, customer, code_link
+        FROM tasks;
+
+        DROP TABLE tasks;
+        ALTER TABLE tasks_new RENAME TO tasks;
+
+        COMMIT;
+        PRAGMA foreign_keys=on;
+        """
+    )
+
 
 
 def init_db() -> None:
@@ -78,7 +127,7 @@ def init_db() -> None:
             date_created TEXT NOT NULL,
             date_start_work TEXT,
             date_done TEXT,
-            executor_user_id INTEGER NOT NULL,
+            executor_user_id INTEGER,
             customer TEXT,
             code_link TEXT,
             FOREIGN KEY(project_id) REFERENCES projects(id),
@@ -121,6 +170,7 @@ def init_db() -> None:
         """
     )
 
+    _migrate_tasks_executor_nullable(conn)
     _seed_reference_data(conn)
     conn.commit()
     conn.close()

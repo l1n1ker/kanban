@@ -15,10 +15,56 @@ from backend.services import Services
 def get_actor_user(
     x_user_id: int | None = Header(default=None, alias="X-User-Id"),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_login: str | None = Header(default=None, alias="X-User-Login"),
 ) -> dict[str, Any]:
+    if x_user_login:
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT id, login, full_name, role, is_active FROM users WHERE login = ?",
+                (x_user_login,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row or int(row["is_active"]) != 1:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Login '{x_user_login}' is not mapped to an active user",
+            )
+        return {
+            "id": int(row["id"]),
+            "role": row["role"],
+            "login": row["login"],
+            "full_name": row["full_name"],
+        }
+
     if x_user_id is None or x_user_role is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    return {"id": x_user_id, "role": x_user_role}
+
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, login, full_name, role, is_active FROM users WHERE id = ?",
+            (x_user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or int(row["is_active"]) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"User id '{x_user_id}' is not active",
+        )
+    if row["role"] != x_user_role:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Role mismatch for user id '{x_user_id}'",
+        )
+    return {
+        "id": int(row["id"]),
+        "role": row["role"],
+        "login": row["login"],
+        "full_name": row["full_name"],
+    }
 
 
 def get_services(actor_user: dict[str, Any] = Depends(get_actor_user)) -> Iterator[Services]:

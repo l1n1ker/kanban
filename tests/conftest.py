@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     date_created TEXT NOT NULL,
     date_start_work TEXT,
     date_done TEXT,
-    executor_user_id INTEGER NOT NULL,
+    executor_user_id INTEGER,
     customer TEXT,
     code_link TEXT,
     FOREIGN KEY(project_id) REFERENCES projects(id),

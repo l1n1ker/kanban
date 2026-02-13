@@ -163,7 +163,7 @@ class TasksRepo:
                 data["date_created"],
                 data.get("date_start_work"),
                 data.get("date_done"),
-                data["executor_user_id"],
+                data.get("executor_user_id"),
                 data.get("customer"),
                 data.get("code_link"),
             ),

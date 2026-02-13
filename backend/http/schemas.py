@@ -91,7 +91,7 @@ class TaskCreate(BaseModel):
     project_id: int
     description: str
     customer: str
-    executor_user_id: int
+    executor_user_id: Optional[int] = None
     code_link: Optional[str] = None
 
 
@@ -110,7 +110,7 @@ class TaskOut(BaseModel):
     date_created: date
     date_start_work: Optional[date]
     date_done: Optional[date]
-    executor_user_id: int
+    executor_user_id: Optional[int]
     customer: str
     code_link: Optional[str]
 
