@@ -33,7 +33,14 @@ class ApiClient:
         self.actor_user_role = actor_user_role
         self.actor_user_login = (actor_user_login or getpass.getuser()).strip()
 
-    def _request(self, path: str, query: dict[str, Any] | None = None) -> Any:
+    def _request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        query: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
         url = f"{self.base_url}{path}"
         if query:
             filtered = {k: v for k, v in query.items() if v is not None}
@@ -45,17 +52,28 @@ class ApiClient:
         else:
             headers["X-User-Id"] = str(self.actor_user_id)
             headers["X-User-Role"] = self.actor_user_role
-        req = Request(url, method="GET", headers=headers)
+        data = None
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = Request(url, method=method, headers=headers, data=data)
         try:
             with urlopen(req, timeout=10) as response:
                 payload = response.read().decode("utf-8")
                 return json.loads(payload) if payload else None
         except HTTPError as exc:
+            detail = ""
+            try:
+                body = exc.read().decode("utf-8")
+                if body:
+                    detail = f": {body}"
+            except Exception:
+                detail = ""
             if exc.code == 401:
                 raise ApiClientError(
-                    f"HTTP 401 for {url}. Login '{self.actor_user_login}' is not mapped to an active user."
+                    f"HTTP 401 for {url}. Login '{self.actor_user_login}' is not mapped to an active user.{detail}"
                 ) from exc
-            raise ApiClientError(f"HTTP {exc.code} for {url}") from exc
+            raise ApiClientError(f"HTTP {exc.code} for {url}{detail}") from exc
         except URLError as exc:
             raise ApiClientError(f"API unavailable: {exc.reason}") from exc
 
@@ -65,11 +83,32 @@ class ApiClient:
     def get_session_user(self) -> dict[str, Any]:
         return self._request("/session/me")
 
-    def list_pockets(self) -> list[dict[str, Any]]:
-        return self._request("/pockets")
+    def list_pockets(self, status: str | None = None) -> list[dict[str, Any]]:
+        return self._request("/pockets", query={"status": status})
 
-    def list_projects(self) -> list[dict[str, Any]]:
-        return self._request("/projects")
+    def create_pocket(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("/pockets", method="POST", payload=payload)
+
+    def update_pocket(self, pocket_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request(f"/pockets/{pocket_id}", method="PATCH", payload=payload)
+
+    def list_projects(self, pocket_id: int | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        return self._request("/projects", query={"pocket_id": pocket_id, "status": status})
+
+    def create_project(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("/projects", method="POST", payload=payload)
+
+    def update_project(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request(f"/projects/{project_id}", method="PATCH", payload=payload)
 
     def list_tasks(self) -> list[dict[str, Any]]:
         return self._request("/tasks")
+
+    def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("/tasks", method="POST", payload=payload)
+
+    def update_task(self, task_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request(f"/tasks/{task_id}", method="PATCH", payload=payload)
+
+    def task_action(self, task_id: int, action: str, comment: str | None = None) -> dict[str, Any]:
+        return self._request(f"/tasks/{task_id}/{action}", method="POST", payload={"comment": comment})

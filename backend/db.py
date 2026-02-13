@@ -77,6 +77,23 @@ def _migrate_tasks_executor_nullable(conn: sqlite3.Connection) -> None:
     )
 
 
+def _projects_has_project_code(conn: sqlite3.Connection) -> bool:
+    try:
+        rows = conn.execute("PRAGMA table_info(projects)").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        if row[1] == "project_code":
+            return True
+    return False
+
+
+def _migrate_projects_add_project_code(conn: sqlite3.Connection) -> None:
+    if _projects_has_project_code(conn):
+        return
+    conn.execute("ALTER TABLE projects ADD COLUMN project_code TEXT")
+
+
 
 def init_db() -> None:
     conn = get_connection()
@@ -107,6 +124,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
+            project_code TEXT,
             pocket_id INTEGER NOT NULL,
             status TEXT NOT NULL,
             date_start TEXT NOT NULL,
@@ -171,6 +189,7 @@ def init_db() -> None:
     )
 
     _migrate_tasks_executor_nullable(conn)
+    _migrate_projects_add_project_code(conn)
     _seed_reference_data(conn)
     conn.commit()
     conn.close()

@@ -58,6 +58,7 @@ class PocketOut(BaseModel):
 
 class ProjectCreate(BaseModel):
     name: str
+    project_code: Optional[str] = None
     pocket_id: int
     status: Literal["Активен", "Завершён"]
     date_start: date
@@ -68,6 +69,7 @@ class ProjectCreate(BaseModel):
 
 class ProjectUpdate(BaseModel):
     name: Optional[str] = None
+    project_code: Optional[str] = None
     pocket_id: Optional[int] = None
     status: Optional[Literal["Активен", "Завершён"]] = None
     date_start: Optional[date] = None
@@ -79,6 +81,7 @@ class ProjectUpdate(BaseModel):
 class ProjectOut(BaseModel):
     id: int
     name: str
+    project_code: Optional[str]
     pocket_id: int
     status: Literal["Активен", "Завершён"]
     date_start: date
@@ -96,6 +99,7 @@ class TaskCreate(BaseModel):
 
 
 class TaskUpdate(BaseModel):
+    project_id: Optional[int] = None
     description: Optional[str] = None
     customer: Optional[str] = None
     executor_user_id: Optional[int] = None

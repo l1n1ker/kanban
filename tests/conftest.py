@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS pockets (
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
+    project_code TEXT,
     pocket_id INTEGER NOT NULL,
     status TEXT NOT NULL,
     date_start TEXT NOT NULL,

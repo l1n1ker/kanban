@@ -98,11 +98,12 @@ class ProjectsRepo:
     def create(self, *, actor_user_id: int, data: dict[str, Any]) -> dict[str, Any]:
         cur = self.conn.execute(
             """
-            INSERT INTO projects (name, pocket_id, status, date_start, date_end, curator_business_user_id, curator_it_user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO projects (name, project_code, pocket_id, status, date_start, date_end, curator_business_user_id, curator_it_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["name"],
+                data.get("project_code"),
                 data["pocket_id"],
                 data["status"],
                 data["date_start"],

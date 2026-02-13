@@ -66,6 +66,29 @@ class Services:
         if new_status not in allowed:
             raise ValueError(f"Invalid task transition: {current_status} -> {new_status}")
 
+    def _validate_pocket_dates(
+        self,
+        *,
+        date_start_value: str | None,
+        date_end_value: str | None,
+    ) -> None:
+        if not date_start_value:
+            return
+        if not date_end_value:
+            return
+        start = date.fromisoformat(date_start_value)
+        end = date.fromisoformat(date_end_value)
+        if end < start:
+            raise ValueError("date_end cannot be earlier than date_start")
+
+    def _as_iso_date_or_none(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or text.lower() == "none":
+            return None
+        return text
+
     # Users
     def create_user(self, **data: Any) -> dict[str, Any]:
         self._check("users.create")
@@ -101,6 +124,10 @@ class Services:
     # Pockets
     def create_pocket(self, data: dict[str, Any]) -> dict[str, Any]:
         self._check("pockets.create")
+        self._validate_pocket_dates(
+            date_start_value=self._as_iso_date_or_none(data.get("date_start")),
+            date_end_value=self._as_iso_date_or_none(data.get("date_end")),
+        )
         result = self.pockets.create(actor_user_id=self.actor_user["id"], data=data)
         if result:
             self._log(entity_type="pocket", entity_id=result["id"], action_type="create", old=None, new=result)
@@ -117,6 +144,15 @@ class Services:
     def update_pocket(self, pocket_id: int, updates: dict[str, Any]) -> dict[str, Any]:
         self._check("pockets.update")
         current = self.pockets.get(pocket_id)
+        if not current:
+            return {}
+        start_value = self._as_iso_date_or_none(
+            updates.get("date_start", current.get("date_start"))
+        )
+        end_value = self._as_iso_date_or_none(
+            updates.get("date_end", current.get("date_end"))
+        )
+        self._validate_pocket_dates(date_start_value=start_value, date_end_value=end_value)
         result = self.pockets.update(actor_user_id=self.actor_user["id"], pocket_id=pocket_id, updates=updates)
         if result:
             action_type = self._action_type_for_update(updates)
