@@ -6,7 +6,7 @@ import os
 import getpass
 from dataclasses import dataclass
 from datetime import date, datetime
-from tkinter import BOTH, END, LEFT, RIGHT, TOP, VERTICAL, StringVar, Tk, Toplevel
+from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, BooleanVar, Canvas, PhotoImage, StringVar, Tk, Toplevel
 from tkinter import font as tkfont
 from tkinter import messagebox, simpledialog, ttk
 from typing import Any
@@ -17,6 +17,11 @@ try:
     from tkcalendar import Calendar
 except Exception:
     Calendar = None
+
+try:
+    from PIL import ImageTk
+except Exception:
+    ImageTk = None
 
 
 DEFAULT_PRESET_NAME = "Активные задачи"
@@ -64,9 +69,53 @@ PROJECT_COLUMN_TITLES: dict[str, str] = {
     "curator_business": "Куратор бизнес",
     "curator_it": "Куратор ИТ",
 }
-THEME_CONFIGS: dict[str, dict[str, str]] = {
-    "forest-light": {"admin": "#b42318", "head": "#b54708", "teamlead": "#175cd3", "curator": "#067647", "executor": "#57606a"},
-    "forest-dark": {"admin": "#ff8a80", "head": "#f9d37a", "teamlead": "#8ab4ff", "curator": "#8dd9a5", "executor": "#c2c9d2"},
+DEFAULT_THEME_NAME = "forest-light"
+DEFAULT_THEME_TOKENS: dict[str, Any] = {
+    "id": "forest-light",
+    "base_ttk_theme": "forest-light",
+    "colors": {
+        "surface_bg": "#F7F8F5",
+        "surface_panel": "#FFFFFF",
+        "text_primary": "#1F2A2A",
+        "text_muted": "#5F6B6D",
+        "accent": "#4F6B5A",
+        "accent_hover": "#3F594A",
+        "selection_bg": "#6E8B74",
+        "selection_fg": "#FFFFFF",
+        "border": "#D8DDD8",
+        "danger": "#B5483A",
+        "warning": "#B07A2F",
+        "info": "#3D6475",
+        "success": "#4E7A60",
+    },
+    "roles": {
+        "admin": "#B5483A",
+        "head": "#B07A2F",
+        "teamlead": "#3D6475",
+        "curator": "#4E7A60",
+        "executor": "#5F6B6D",
+    },
+    "icons": {"palette": "light"},
+}
+PROJECT_FILTER_FIELDS = {
+    "pocket_id",
+    "pocket_name",
+    "project_id",
+    "project_name",
+    "project_code",
+    "date_start",
+    "date_end",
+    "status",
+    "owner",
+    "owner_it",
+}
+KANBAN_ACTION_ICONS = {
+    "claim": "claim",
+    "assign": "assign",
+    "start": "start",
+    "pause": "pause",
+    "resume": "resume",
+    "complete": "complete",
 }
 
 
@@ -81,8 +130,26 @@ def _preset_file() -> str:
     return os.path.join(_app_dir(), "filter_presets.json")
 
 
+def _kanban_preset_file() -> str:
+    return os.path.join(_app_dir(), "kanban_filter_presets.json")
+
+
 def _ui_config_file() -> str:
     return os.path.join(_app_dir(), "ui_config.json")
+
+
+def _themes_dir() -> str:
+    return os.path.join(os.path.dirname(__file__), "themes")
+
+
+def _theme_file(theme_id: str) -> str:
+    return os.path.join(_themes_dir(), f"{theme_id.replace('-', '_')}.json")
+
+
+def _icons_source_dir(palette: str) -> str:
+    if palette not in {"light", "dark"}:
+        palette = "light"
+    return os.path.join(os.path.dirname(__file__), "assets", "icons", palette)
 
 
 def _forest_theme_file(theme_name: str) -> str:
@@ -100,6 +167,25 @@ class FilterRow:
     value_var: StringVar
 
 
+@dataclass
+class FilterRowState:
+    logic: str = "AND"
+    field: str = "status"
+    op: str = "!="
+    value: str = "Завершена"
+    tag: str = ""
+
+
+@dataclass
+class FilterContext:
+    rows: list[FilterRowState]
+    preset_name: str = DEFAULT_PRESET_NAME
+    dashboard_visible: bool = False
+    kanban_visible: bool = False
+    summary_short: str = "Фильтр: пуст"
+    summary_full: str = "Фильтр пуст"
+
+
 class KanbanTkApp(Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -110,6 +196,8 @@ class KanbanTkApp(Tk):
         self.session_user: dict[str, Any] | None = None
         self.session_var = StringVar(value=f"Сессия: login={self.system_login}")
         self.theme_name = self._load_theme_name()
+        self.theme_tokens = self._load_theme_tokens_with_fallback(self.theme_name)
+        self.theme_name = str(self.theme_tokens.get("id", DEFAULT_THEME_NAME))
         self.theme_var = StringVar(value=self.theme_name)
         self.role_colors = self._role_palette_for_theme(self.theme_name)
         self._setup_forest_theme()
@@ -120,7 +208,10 @@ class KanbanTkApp(Tk):
         self.projects_by_id: dict[int, dict[str, Any]] = {}
         self.tasks_all: list[dict[str, Any]] = []
         self.selected_project_id: int | None = None
+        self.show_projects_without_tasks_var = BooleanVar(value=False)
         self.current_zone = "dashboard"
+        self._in_filter_refresh = False
+        self._suppress_top_select_event = False
 
         self.filter_visible = False
         self.filter_rows: list[FilterRow] = []
@@ -128,6 +219,18 @@ class KanbanTkApp(Tk):
         self.filter_summary_var = StringVar(value="Фильтр: пуст")
         self._filter_summary_full_text = "Фильтр пуст"
         self._filter_tooltip: Toplevel | None = None
+        self.kanban_filter_visible = False
+        self.kanban_filter_rows: list[FilterRow] = []
+        self.kanban_presets = self._load_kanban_presets()
+        self.kanban_filter_summary_var = StringVar(value="Фильтр: пуст")
+        self._kanban_filter_summary_full_text = "Фильтр пуст"
+        self._kanban_filter_tooltip: Toplevel | None = None
+        self._widget_tooltip: Toplevel | None = None
+        self.global_filter_context = FilterContext(
+            rows=[FilterRowState(logic="AND", field="status", op="!=", value="Завершена")]
+        )
+        self.icon_images: dict[str, PhotoImage] = {}
+        self._icon_error_shown = False
         self.pocket_window: Toplevel | None = None
         self.pocket_tree: ttk.Treeview | None = None
         self.pocket_status_filter_var = StringVar(value="Активные")
@@ -149,6 +252,13 @@ class KanbanTkApp(Tk):
         self._build_menu()
         self._build_ribbon()
         self._build_zones()
+        self._sync_global_filter_context_from_rows(
+            self.filter_rows,
+            zone="dashboard",
+            preset_name=self.preset_var.get() if hasattr(self, "preset_var") else DEFAULT_PRESET_NAME,
+            visible=self.filter_visible,
+        )
+        self._apply_global_filter_context_to_zone("kanban")
         self._show_zone("dashboard")
         self._load_dashboard_data()
 
@@ -183,17 +293,6 @@ class KanbanTkApp(Tk):
         self.ribbon = ttk.Frame(self, padding=(8, 8))
         self.ribbon.pack(side=TOP, fill="x")
         ttk.Frame(self.ribbon).pack(side=LEFT, fill="x", expand=True)
-        self._mk_button(self.ribbon, "☀", self._theme_in_development, width=3).pack(side=RIGHT, padx=2)
-        self._mk_button(self.ribbon, "🌙", self._theme_in_development, width=3).pack(side=RIGHT, padx=2)
-        self.session_label = ttk.Label(
-            self.ribbon,
-            textvariable=self.session_var,
-            cursor="hand2",
-            style="Session.TLabel",
-            padding=(8, 2),
-        )
-        self.session_label.pack(side=RIGHT, padx=4)
-        self.session_label.bind("<Button-1>", self._on_session_click)
 
     def _build_zones(self) -> None:
         self.zones: dict[str, ttk.Frame] = {}
@@ -204,13 +303,19 @@ class KanbanTkApp(Tk):
         self._build_dashboard(dashboard)
         self.zones["dashboard"] = dashboard
 
-        for name, caption in (
-            ("kanban", "Kanban (в разработке)"),
-            ("timeline", "Timeline (в разработке)"),
-            ("analytics", "Аналитика (в разработке)"),
-        ):
+        kanban = ttk.Frame(container)
+        self._build_kanban(kanban)
+        self.zones["kanban"] = kanban
+
+        for name, caption in (("timeline", "Timeline (в разработке)"), ("analytics", "Аналитика (в разработке)")):
             frame = ttk.Frame(container)
             ttk.Label(frame, text=caption).pack(pady=30)
+            summary_var = StringVar(value=self.global_filter_context.summary_short)
+            if name == "timeline":
+                self.timeline_filter_summary_var = summary_var
+            else:
+                self.analytics_filter_summary_var = summary_var
+            ttk.Label(frame, textvariable=summary_var, style="Surface.TLabel").pack(side=BOTTOM, anchor="e", padx=12, pady=12)
             self.zones[name] = frame
 
     def _build_dashboard(self, parent: ttk.Frame) -> None:
@@ -218,13 +323,19 @@ class KanbanTkApp(Tk):
         toolbar.pack(fill="x")
         self._mk_button(toolbar, "Обновить", self._load_dashboard_data).pack(side=LEFT)
 
-        vertical = ttk.Panedwindow(parent, orient=VERTICAL)
-        vertical.pack(fill=BOTH, expand=True, padx=8, pady=8)
+        content = ttk.Frame(parent, padding=(8, 8))
+        content.pack(fill=BOTH, expand=True)
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_rowconfigure(1, weight=1)
 
-        top = ttk.Frame(vertical)
-        bottom = ttk.Frame(vertical)
-        vertical.add(top, weight=1)
-        vertical.add(bottom, weight=1)
+        top = ttk.Frame(content)
+        top.grid(row=0, column=0, sticky="nsew")
+        top.grid_columnconfigure(0, weight=1)
+        top.grid_rowconfigure(0, weight=1)
+        bottom = ttk.Frame(content)
+        bottom.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        bottom.grid_columnconfigure(0, weight=1)
+        bottom.grid_rowconfigure(0, weight=1)
 
         top_cols = (
             "pocket_id",
@@ -244,7 +355,11 @@ class KanbanTkApp(Tk):
             self.top_tree.column(col, width=120, anchor="w")
         self.top_tree.column("pocket_id", anchor="center")
         self.top_tree.column("project_id", anchor="center")
-        self.top_tree.pack(fill=BOTH, expand=True)
+        top_vscroll = ttk.Scrollbar(top, orient=VERTICAL, command=self.top_tree.yview)
+        self.top_tree.configure(yscrollcommand=top_vscroll.set)
+        self.top_tree.grid(row=0, column=0, sticky="nsew")
+        top_vscroll.grid(row=0, column=1, sticky="ns")
+        self.top_tree.configure(height=4)
         self.top_tree.bind("<<TreeviewSelect>>", self._on_top_select)
         self.top_tree.bind("<Double-1>", self._on_top_double_click)
 
@@ -265,7 +380,10 @@ class KanbanTkApp(Tk):
             self.bottom_tree.column(col, width=150, anchor="w")
         self.bottom_tree.column("id", anchor="center")
         self.bottom_tree.column("description", width=360)
-        self.bottom_tree.pack(fill=BOTH, expand=True)
+        bottom_vscroll = ttk.Scrollbar(bottom, orient=VERTICAL, command=self.bottom_tree.yview)
+        self.bottom_tree.configure(yscrollcommand=bottom_vscroll.set)
+        self.bottom_tree.grid(row=0, column=0, sticky="nsew")
+        bottom_vscroll.grid(row=0, column=1, sticky="ns")
         self.bottom_tree.bind("<Double-1>", self._on_bottom_double_click)
 
         self.filter_panel = ttk.Frame(parent, padding=(8, 8))
@@ -284,6 +402,21 @@ class KanbanTkApp(Tk):
         self.filter_summary_label.pack(side=LEFT, padx=12)
         self.filter_summary_label.bind("<Enter>", self._show_filter_tooltip)
         self.filter_summary_label.bind("<Leave>", self._hide_filter_tooltip)
+        ttk.Checkbutton(
+            self.bottom_controls,
+            text="Показывать проекты без задач",
+            variable=self.show_projects_without_tasks_var,
+            command=self._apply_filters,
+        ).pack(side=RIGHT, padx=4)
+        self.dashboard_session_label = ttk.Label(
+            self.bottom_controls,
+            textvariable=self.session_var,
+            cursor="hand2",
+            style="Session.TLabel",
+            padding=(8, 2),
+        )
+        self.dashboard_session_label.pack(side=RIGHT, padx=6)
+        self.dashboard_session_label.bind("<Button-1>", self._on_session_click)
 
     def _build_filter_panel(self, parent: ttk.Frame) -> None:
         presets_bar = ttk.Frame(parent)
@@ -315,11 +448,123 @@ class KanbanTkApp(Tk):
         self._apply_preset(DEFAULT_PRESET_NAME)
         self._refresh_filter_indicator()
 
+    def _build_kanban(self, parent: ttk.Frame) -> None:
+        toolbar = ttk.Frame(parent, padding=(8, 8))
+        toolbar.pack(fill="x")
+        self._mk_button(toolbar, "Обновить", self._load_dashboard_data).pack(side=LEFT)
+
+        self.kanban_filter_panel = ttk.Frame(parent, padding=(8, 8))
+        self._build_kanban_filter_panel(self.kanban_filter_panel)
+
+        board = ttk.Frame(parent, padding=(8, 8))
+        self.kanban_board_container = board
+        board.pack(fill=BOTH, expand=True)
+        self.kanban_columns: dict[str, ttk.Frame] = {}
+        self.kanban_column_frames: dict[str, ttk.LabelFrame] = {}
+        self.kanban_column_canvases: dict[str, Canvas] = {}
+        self.kanban_column_windows: dict[str, int] = {}
+        columns = [
+            ("queue", "Очередь"),
+            ("created", "Создана"),
+            ("in_progress", "В работе"),
+            ("paused", "Приостановлена"),
+            ("done", "Завершена"),
+        ]
+        for idx, (key, title) in enumerate(columns):
+            col = ttk.LabelFrame(board, text=title, padding=(8, 8), style="KanbanColumn.TLabelframe")
+            col.grid(row=0, column=idx, sticky="nsew", padx=4)
+            board.columnconfigure(idx, weight=1, uniform="kanban")
+            col.grid_columnconfigure(0, weight=1)
+            col.grid_rowconfigure(0, weight=1)
+            canvas = Canvas(
+                col,
+                highlightthickness=0,
+                bd=0,
+                bg=self._theme_color("surface_bg", "#F7F8F5"),
+            )
+            vscroll = ttk.Scrollbar(col, orient=VERTICAL, command=canvas.yview)
+            canvas.configure(yscrollcommand=vscroll.set)
+            canvas.grid(row=0, column=0, sticky="nsew")
+            vscroll.grid(row=0, column=1, sticky="ns")
+            inner = ttk.Frame(canvas, style="Surface.TFrame")
+            window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+            inner.bind("<Configure>", lambda _e, c=canvas: c.configure(scrollregion=c.bbox("all")))
+            canvas.bind(
+                "<Configure>",
+                lambda e, c=canvas, w=window_id: c.itemconfigure(w, width=max(1, int(getattr(e, "width", 1)))),
+            )
+            self.kanban_column_frames[key] = col
+            self.kanban_columns[key] = inner
+            self.kanban_column_canvases[key] = canvas
+            self.kanban_column_windows[key] = window_id
+        board.rowconfigure(0, weight=1)
+
+        self.kanban_bottom_controls = ttk.Frame(parent, padding=(8, 8))
+        self.kanban_bottom_controls.pack(fill="x")
+        self._mk_button(self.kanban_bottom_controls, "Фильтр", self._toggle_kanban_filter_panel).pack(side=LEFT, padx=2)
+        self._mk_button(self.kanban_bottom_controls, "Сброс фильтра", self._reset_kanban_filters).pack(side=LEFT, padx=6)
+        self.kanban_filter_label = ttk.Label(
+            self.kanban_bottom_controls,
+            textvariable=self.kanban_filter_summary_var,
+            style="Surface.TLabel",
+            cursor="hand2",
+        )
+        self.kanban_filter_label.pack(side=LEFT, padx=10)
+        self.kanban_filter_label.bind("<Enter>", self._show_kanban_filter_tooltip)
+        self.kanban_filter_label.bind("<Leave>", self._hide_kanban_filter_tooltip)
+
+        self.session_label = ttk.Label(
+            self.kanban_bottom_controls,
+            textvariable=self.session_var,
+            cursor="hand2",
+            style="Session.TLabel",
+            padding=(8, 2),
+        )
+        self.session_label.pack(side=RIGHT, padx=6)
+        self.session_label.bind("<Button-1>", self._on_session_click)
+
+        self._apply_kanban_preset(DEFAULT_PRESET_NAME)
+        self._refresh_kanban_filter_indicator()
+
+    def _build_kanban_filter_panel(self, parent: ttk.Frame) -> None:
+        presets_bar = ttk.Frame(parent)
+        presets_bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(presets_bar, text="Пресет:").pack(side=LEFT)
+        self.kanban_preset_var = StringVar(value=DEFAULT_PRESET_NAME)
+        self.kanban_preset_combo = ttk.Combobox(
+            presets_bar,
+            textvariable=self.kanban_preset_var,
+            values=sorted(self.kanban_presets.keys()),
+            state="readonly",
+            width=28,
+        )
+        self.kanban_preset_combo.pack(side=LEFT, padx=6)
+        self._mk_button(presets_bar, "Применить", self._apply_selected_kanban_preset).pack(side=LEFT, padx=2)
+        self._mk_button(presets_bar, "Сохранить текущий", self._save_current_kanban_preset).pack(side=LEFT, padx=2)
+        self._mk_button(presets_bar, "Переименовать", self._rename_kanban_preset).pack(side=LEFT, padx=2)
+        self._mk_button(presets_bar, "Удалить", self._delete_kanban_preset).pack(side=LEFT, padx=2)
+
+        self.kanban_rows_holder = ttk.Frame(parent)
+        self.kanban_rows_holder.pack(fill="x")
+        controls = ttk.Frame(parent)
+        controls.pack(fill="x", pady=(6, 0))
+        self._mk_button(controls, "+ Условие", self._add_kanban_filter_row).pack(side=LEFT)
+        self._mk_button(controls, "Применить", self._apply_kanban_filters).pack(side=LEFT, padx=4)
+
     def _show_zone(self, name: str) -> None:
+        self._hide_widget_tooltip()
         self.current_zone = name
         for frame in self.zones.values():
             frame.pack_forget()
         self.zones[name].pack(fill=BOTH, expand=True)
+        if name == "dashboard":
+            self._apply_global_filter_context_to_zone("dashboard")
+            self._apply_filters()
+        elif name == "kanban":
+            self._apply_global_filter_context_to_zone("kanban")
+            self._refresh_kanban_board()
+        elif name in {"timeline", "analytics"}:
+            self._refresh_global_filter_indicators()
 
     def _toggle_filter_panel(self) -> None:
         self.filter_visible = not self.filter_visible
@@ -327,6 +572,208 @@ class KanbanTkApp(Tk):
             self.filter_panel.pack(fill="x", before=self.bottom_controls)
         else:
             self.filter_panel.pack_forget()
+        self._sync_global_filter_context_from_rows(
+            self.filter_rows,
+            zone="dashboard",
+            preset_name=self.preset_var.get() if hasattr(self, "preset_var") else DEFAULT_PRESET_NAME,
+            visible=self.filter_visible,
+        )
+
+    def _toggle_kanban_filter_panel(self) -> None:
+        self.kanban_filter_visible = not self.kanban_filter_visible
+        if self.kanban_filter_visible:
+            self.kanban_filter_panel.pack(fill="x", before=self.kanban_bottom_controls)
+        else:
+            self.kanban_filter_panel.pack_forget()
+        self._sync_global_filter_context_from_rows(
+            self.kanban_filter_rows,
+            zone="kanban",
+            preset_name=self.kanban_preset_var.get() if hasattr(self, "kanban_preset_var") else DEFAULT_PRESET_NAME,
+            visible=self.kanban_filter_visible,
+        )
+
+    def _serialize_filter_rows(self, rows: list[FilterRow]) -> list[dict[str, str]]:
+        payload: list[dict[str, str]] = []
+        for idx, row in enumerate(rows):
+            payload.append(
+                {
+                    "logic": row.logic_var.get() if idx > 0 else "AND",
+                    "field": row.field_var.get(),
+                    "op": row.op_var.get(),
+                    "value": row.value_var.get(),
+                }
+            )
+        return payload
+
+    def _row_states_from_ui_rows(self, rows: list[FilterRow]) -> list[FilterRowState]:
+        states: list[FilterRowState] = []
+        for idx, row in enumerate(rows):
+            states.append(
+                FilterRowState(
+                    logic=row.logic_var.get() if idx > 0 else "AND",
+                    field=row.field_var.get(),
+                    op=row.op_var.get(),
+                    value=row.value_var.get(),
+                )
+            )
+        return states
+
+    def _sync_global_filter_context_from_rows(
+        self,
+        rows: list[FilterRow],
+        zone: str,
+        *,
+        preset_name: str | None = None,
+        visible: bool | None = None,
+    ) -> None:
+        self.global_filter_context.rows = self._row_states_from_ui_rows(rows)
+        if preset_name is not None:
+            self.global_filter_context.preset_name = preset_name
+        if visible is not None:
+            if zone == "dashboard":
+                self.global_filter_context.dashboard_visible = visible
+            elif zone == "kanban":
+                self.global_filter_context.kanban_visible = visible
+        self._refresh_global_filter_indicators()
+
+    def _build_effective_filter_rows(self) -> list[FilterRowState]:
+        rows = list(self.global_filter_context.rows)
+        if self.selected_project_id is not None:
+            rows.append(
+                FilterRowState(
+                    logic="AND",
+                    field="project_id",
+                    op="==",
+                    value=str(self.selected_project_id),
+                    tag="selected",
+                )
+            )
+        return rows
+
+    def _build_filtered_task_rows(self) -> list[dict[str, Any]]:
+        rows = [self._build_task_view(t) for t in self.tasks_all]
+        return self._apply_global_filter_to_zone("global", rows)
+
+    def _build_top_rows_from_filtered_tasks(self, filtered_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        all_project_rows = self._build_project_view_rows(list(self.projects_by_id.values()))
+        by_project_id = {int(r["project_id"]): r for r in all_project_rows}
+        selected_project_ids = sorted({int(r["project_id"]) for r in filtered_tasks})
+        return [by_project_id[pid] for pid in selected_project_ids if pid in by_project_id]
+
+    def _augment_top_rows_with_empty_projects(self, top_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not self.show_projects_without_tasks_var.get():
+            return top_rows
+        all_rows = self._build_project_view_rows(list(self.projects_by_id.values()))
+        filtered_project_rows = self._apply_project_table_filters(all_rows, self._build_effective_filter_rows())
+        existing = {int(r["project_id"]) for r in top_rows}
+        for row in filtered_project_rows:
+            pid = int(row["project_id"])
+            if pid not in existing:
+                top_rows.append(row)
+                existing.add(pid)
+        return top_rows
+
+    def _replace_dashboard_filter_rows_from_context(self) -> None:
+        if not hasattr(self, "rows_holder"):
+            return
+        for row in self.filter_rows:
+            row.frame.destroy()
+        self.filter_rows.clear()
+        for cond in self.global_filter_context.rows:
+            self._add_filter_row(
+                field=cond.field or "status",
+                op=cond.op or "==",
+                value=cond.value,
+                logic=cond.logic or "AND",
+            )
+        self.filter_visible = bool(self.global_filter_context.dashboard_visible)
+        if self.filter_visible:
+            self.filter_panel.pack(fill="x", before=self.bottom_controls)
+        else:
+            self.filter_panel.pack_forget()
+
+    def _replace_kanban_filter_rows_from_context(self) -> None:
+        if not hasattr(self, "kanban_rows_holder"):
+            return
+        for row in self.kanban_filter_rows:
+            row.frame.destroy()
+        self.kanban_filter_rows.clear()
+        for cond in self.global_filter_context.rows:
+            self._add_kanban_filter_row(
+                field=cond.field or "status",
+                op=cond.op or "==",
+                value=cond.value,
+                logic=cond.logic or "AND",
+            )
+        self.kanban_filter_visible = bool(self.global_filter_context.kanban_visible)
+        if self.kanban_filter_visible:
+            self.kanban_filter_panel.pack(fill="x", before=self.kanban_bottom_controls)
+        else:
+            self.kanban_filter_panel.pack_forget()
+
+    def _apply_global_filter_context_to_zone(self, zone_name: str) -> None:
+        if zone_name == "dashboard":
+            self._replace_dashboard_filter_rows_from_context()
+            if hasattr(self, "preset_var"):
+                self.preset_var.set(self.global_filter_context.preset_name)
+        elif zone_name == "kanban":
+            self._replace_kanban_filter_rows_from_context()
+            if hasattr(self, "kanban_preset_var"):
+                self.kanban_preset_var.set(self.global_filter_context.preset_name)
+
+    def _apply_global_filter_to_zone(self, zone_name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        del zone_name  # reserved for timeline/analytics specific behavior
+        result = list(rows)
+        conditions = self._build_effective_filter_rows()
+        for idx, cond in enumerate(conditions):
+            field = (cond.field or "").strip()
+            op = (cond.op or "").strip()
+            raw = cond.value
+            if not field or not op:
+                continue
+            logic = cond.logic if idx > 0 else "AND"
+            source_rows = result if logic == "AND" else rows
+            filtered = [r for r in source_rows if self._match_condition(r.get(field), op, raw)]
+            if idx == 0 or logic == "AND":
+                result = filtered
+            else:
+                ids = {int(r["id"]) for r in result}
+                for item in filtered:
+                    if int(item["id"]) not in ids:
+                        result.append(item)
+        return result
+
+    def _format_filter_text_for_states(self, rows: list[FilterRowState]) -> str:
+        parts: list[str] = []
+        for idx, cond in enumerate(rows):
+            field = cond.field.strip()
+            op = cond.op.strip()
+            value = cond.value.strip()
+            if not field or not op:
+                continue
+            clause = f"{field} {op} {value}".strip()
+            if cond.tag == "selected":
+                clause = f"{clause} [selected]"
+            if idx > 0:
+                clause = f"{cond.logic} {clause}"
+            parts.append(clause)
+        if not parts:
+            return "Фильтр пуст"
+        return " ".join(parts)
+
+    def _refresh_global_filter_indicators(self) -> None:
+        full_text = self._format_filter_text_for_states(self._build_effective_filter_rows())
+        short_text = full_text if len(full_text) <= 100 else f"{full_text[:100].rstrip()}..."
+        self.global_filter_context.summary_full = full_text
+        self.global_filter_context.summary_short = short_text
+        self._filter_summary_full_text = full_text
+        self._kanban_filter_summary_full_text = full_text
+        self.filter_summary_var.set(short_text)
+        self.kanban_filter_summary_var.set(short_text)
+        if hasattr(self, "timeline_filter_summary_var"):
+            self.timeline_filter_summary_var.set(short_text)
+        if hasattr(self, "analytics_filter_summary_var"):
+            self.analytics_filter_summary_var.set(short_text)
 
     def _load_dashboard_data(self) -> None:
         try:
@@ -358,8 +805,8 @@ class KanbanTkApp(Tk):
         self.pockets_by_id = {int(p["id"]): p for p in pockets}
         self.projects_by_id = {int(p["id"]): p for p in projects}
         self.tasks_all = tasks
-        self._fill_top_table(projects)
         self._apply_filters()
+        self._refresh_kanban_board()
 
     def _on_session_click(self, _: object) -> None:
         if not self.session_user:
@@ -398,7 +845,13 @@ class KanbanTkApp(Tk):
         if not self.session_user:
             return False
         role = str(self.session_user.get("role", "executor"))
-        return role in {"admin", "head"}
+        return role in {"admin", "head", "curator"}
+
+    def _can_create_pockets(self) -> bool:
+        if not self.session_user:
+            return False
+        role = str(self.session_user.get("role", "executor"))
+        return role in {"admin", "head", "curator"}
 
     def _status_filter_to_api(self) -> str | None:
         ui_value = self.pocket_status_filter_var.get()
@@ -451,17 +904,21 @@ class KanbanTkApp(Tk):
 
         actions = ttk.Frame(w, padding=(10, 10))
         actions.pack(fill="x")
-        self._mk_button(actions, "Создать", self._open_pocket_form_create).pack(side=LEFT, padx=2)
-        self._mk_button(actions, "Изменить", self._open_pocket_form_edit).pack(side=LEFT, padx=2)
-        self._mk_button(actions, "В архив", self._archive_selected_pocket).pack(side=LEFT, padx=2)
-        ttk.Label(actions, text="Удаление не предусмотрено, используйте 'В архив'.", style="Surface.TLabel").pack(
-            side=LEFT, padx=14
-        )
+        create_btn = self._mk_button(actions, "Создать", self._open_pocket_form_create)
+        create_btn.pack(side=LEFT, padx=2)
+        edit_btn = self._mk_button(actions, "Изменить", self._open_pocket_form_edit)
+        edit_btn.pack(side=LEFT, padx=2)
+        archive_btn = self._mk_button(actions, "В архив", self._archive_selected_pocket)
+        archive_btn.pack(side=LEFT, padx=2)
+        ttk.Label(actions, text="Удаление не поддерживается. Используйте архив.", style="Surface.TLabel").pack(side=LEFT, padx=14)
 
-        if not self._can_manage_pockets():
-            for child in actions.winfo_children():
-                if isinstance(child, ttk.Button) and child.cget("text") in {"Создать", "Изменить", "В архив"}:
-                    child.state(["disabled"])
+        can_create = self._can_create_pockets()
+        can_manage = self._can_manage_pockets()
+        if not can_create:
+            create_btn.state(["disabled"])
+        if not can_manage:
+            edit_btn.state(["disabled"])
+            archive_btn.state(["disabled"])
 
         self._refresh_pockets_table()
 
@@ -533,8 +990,20 @@ class KanbanTkApp(Tk):
         self._open_pocket_form(mode="edit", pocket=pocket)
 
     def _open_pocket_form(self, *, mode: str, pocket: dict[str, Any] | None) -> None:
-        if not self._can_manage_pockets():
-            messagebox.showwarning("Недостаточно прав", "Доступно только ролям admin/head.", parent=self.pocket_window)
+        if mode == "create":
+            if not self._can_create_pockets():
+                messagebox.showwarning(
+                    "???????????? ????",
+                    "Создание доступно для роли куратор и выше.",
+                    parent=self.pocket_window,
+                )
+                return
+        elif not self._can_manage_pockets():
+            messagebox.showwarning(
+                "???????????? ????",
+                "Изменение и архивация доступны для ролей куратор, head, admin.",
+                parent=self.pocket_window,
+            )
             return
 
         if not self.pocket_users_by_id:
@@ -731,7 +1200,7 @@ class KanbanTkApp(Tk):
 
     def _archive_selected_pocket(self) -> None:
         if not self._can_manage_pockets():
-            messagebox.showwarning("Недостаточно прав", "Доступно только ролям admin/head.", parent=self.pocket_window)
+            messagebox.showwarning("???????????? ????", "???????? ??? ????? ???????, head, admin.", parent=self.pocket_window)
             return
         pocket_id = self._selected_pocket_id()
         if pocket_id is None:
@@ -902,7 +1371,7 @@ class KanbanTkApp(Tk):
 
     def _open_project_form(self, *, mode: str, project: dict[str, Any] | None) -> None:
         if not self._can_manage_pockets():
-            messagebox.showwarning("Недостаточно прав", "Доступно только ролям admin/head.", parent=self.project_window)
+            messagebox.showwarning("???????????? ????", "???????? ??? ????? ???????, head, admin.", parent=self.project_window)
             return
         try:
             raw_users = self.api.list_users()
@@ -1048,7 +1517,7 @@ class KanbanTkApp(Tk):
 
     def _archive_selected_project(self) -> None:
         if not self._can_manage_pockets():
-            messagebox.showwarning("Недостаточно прав", "Доступно только ролям admin/head.", parent=self.project_window)
+            messagebox.showwarning("???????????? ????", "???????? ??? ????? ???????, head, admin.", parent=self.project_window)
             return
         project_id = self._selected_project_id()
         if project_id is None:
@@ -1286,6 +1755,7 @@ class KanbanTkApp(Tk):
         user_items = [(int(u["id"]), str(u.get("full_name", ""))) for _, u in sorted(users.items(), key=lambda item: str(item[1].get("full_name", "")))]
         user_label_to_id = {f"{full_name} (id:{uid})": uid for uid, full_name in user_items}
         user_options = ["(Не назначен)"] + list(user_label_to_id.keys())
+        customer_options = sorted({full_name for _, full_name in user_items if full_name})
 
         w = self._create_popup(self.task_window or self)
         w.title("Новая задача" if mode == "create" else f"Изменить задачу #{task.get('id') if task else ''}")
@@ -1328,7 +1798,9 @@ class KanbanTkApp(Tk):
         ttk.Label(basic, text="Исполнитель").grid(row=3, column=0, sticky="w", pady=4, padx=(0, 8))
         ttk.Combobox(basic, textvariable=executor_var, values=user_options, state="readonly").grid(row=3, column=1, sticky="ew", pady=4)
         ttk.Label(basic, text="Заказчик *").grid(row=4, column=0, sticky="w", pady=4, padx=(0, 8))
-        ttk.Entry(basic, textvariable=customer_var).grid(row=4, column=1, sticky="ew", pady=4)
+        ttk.Combobox(basic, textvariable=customer_var, values=customer_options, state="normal").grid(
+            row=4, column=1, sticky="ew", pady=4
+        )
         ttk.Label(basic, text="Код/ссылка").grid(row=5, column=0, sticky="w", pady=4, padx=(0, 8))
         ttk.Entry(basic, textvariable=code_link_var).grid(row=5, column=1, sticky="ew", pady=4)
         if mode == "edit":
@@ -1458,6 +1930,247 @@ class KanbanTkApp(Tk):
             return
         self._refresh_tasks_table()
         self._load_dashboard_data()
+
+    def _reset_kanban_filters(self) -> None:
+        self.global_filter_context.rows = [FilterRowState(logic="AND", field="status", op="!=", value="Завершена")]
+        self.global_filter_context.preset_name = DEFAULT_PRESET_NAME
+        self.global_filter_context.dashboard_visible = False
+        self.global_filter_context.kanban_visible = False
+        self.selected_project_id = None
+        if hasattr(self, "top_tree"):
+            self._suppress_top_select_event = True
+            try:
+                self.top_tree.selection_remove(*self.top_tree.selection())
+            finally:
+                self._suppress_top_select_event = False
+        self._apply_global_filter_context_to_zone("dashboard")
+        self._apply_global_filter_context_to_zone("kanban")
+        if hasattr(self, "preset_var"):
+            self.preset_var.set(DEFAULT_PRESET_NAME)
+        if hasattr(self, "kanban_preset_var"):
+            self.kanban_preset_var.set(DEFAULT_PRESET_NAME)
+        self._refresh_global_filter_indicators()
+        self._apply_filters()
+        self._refresh_kanban_board()
+
+    def _apply_kanban_filters(self) -> None:
+        self._sync_global_filter_context_from_rows(
+            self.kanban_filter_rows,
+            zone="kanban",
+            preset_name=self.kanban_preset_var.get() if hasattr(self, "kanban_preset_var") else DEFAULT_PRESET_NAME,
+            visible=self.kanban_filter_visible,
+        )
+        self._apply_global_filter_context_to_zone("dashboard")
+        if hasattr(self, "preset_var"):
+            preset_name = self.global_filter_context.preset_name
+            self.preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
+        self._refresh_dashboard_top_table_from_filter_context()
+        self._refresh_dashboard_bottom_table_from_selection_and_filter()
+        self._refresh_kanban_board()
+
+    def _refresh_kanban_board(self) -> None:
+        if not hasattr(self, "kanban_columns"):
+            return
+        self._ensure_kanban_icons_ready()
+        rows = self._build_filtered_task_rows()
+        grouped: dict[str, list[dict[str, Any]]] = {
+            "queue": [],
+            "created": [],
+            "in_progress": [],
+            "paused": [],
+            "done": [],
+        }
+        for row in rows:
+            status_name = str(row.get("status", ""))
+            has_executor = row.get("executor_user_id") is not None
+            if status_name == "Создана" and not has_executor:
+                grouped["queue"].append(row)
+                continue
+            if status_name == "Создана" and has_executor:
+                grouped["created"].append(row)
+            elif status_name == "В работе":
+                grouped["in_progress"].append(row)
+            elif status_name == "Приостановлена":
+                grouped["paused"].append(row)
+            elif status_name == "Завершена":
+                grouped["done"].append(row)
+            else:
+                grouped["created"].append(row)
+
+        for key, holder in self.kanban_columns.items():
+            for child in holder.winfo_children():
+                child.destroy()
+            if not grouped[key]:
+                ttk.Label(holder, text="\u041d\u0435\u0442 \u0437\u0430\u0434\u0430\u0447", style="Surface.TLabel").pack(anchor="center", pady=12)
+            holder.update_idletasks()
+            canvas = self.kanban_column_canvases.get(key)
+            if canvas is not None:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.yview_moveto(0)
+            if not grouped[key]:
+                continue
+            for task in grouped[key]:
+                self._render_kanban_card(holder, task, queue=(key == "queue"))
+            holder.update_idletasks()
+            if canvas is not None:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+        self._refresh_kanban_filter_indicator()
+
+    def _render_kanban_card(self, parent: ttk.Frame, task: dict[str, Any], *, queue: bool) -> None:
+        card = ttk.Frame(parent, padding=(8, 8), style="Surface.TFrame", width=248, height=164)
+        card.pack(fill="x", pady=4)
+        card.pack_propagate(False)
+
+        content = ttk.Frame(card, style="Surface.TFrame", height=108)
+        content.pack(fill="x", expand=True)
+        content.pack_propagate(False)
+
+        description = str(task.get("description", "")).strip()
+        if len(description) > 64:
+            description = f"{description[:64].rstrip()}..."
+        lines = [
+            f"#{task.get('id')} {description}",
+            f"{task.get('pocket_name', '')} / {task.get('project_name', '')}",
+            f"Исполнитель: {task.get('executor_full_name') or '-'}",
+            f"Статус: {task.get('status')}",
+        ]
+        for line in lines:
+            lbl = ttk.Label(content, text=line, style="Surface.TLabel", wraplength=228)
+            lbl.pack(anchor="w")
+            lbl.bind("<Double-1>", lambda _e, t=task: self._open_task_form(mode="edit", task=t))
+        card.bind("<Double-1>", lambda _e, t=task: self._open_task_form(mode="edit", task=t))
+
+        actions = ttk.Frame(card, style="Surface.TFrame")
+        actions.pack(side=BOTTOM, fill="x", pady=(6, 0))
+        task_id = int(task["id"])
+        if queue and self.session_user is not None:
+            role = str(self.session_user.get("role", "executor"))
+            if role in {"executor", "curator", "teamlead", "head", "admin"}:
+                self._add_kanban_action_button(actions, "claim", "Принять задачу", lambda tid=task_id: self._kanban_claim_task(tid))
+            if role in {"curator", "teamlead", "head", "admin"}:
+                self._add_kanban_action_button(
+                    actions,
+                    "assign",
+                    "Назначить исполнителя",
+                    lambda tid=task_id: self._open_kanban_assign_popup(tid),
+                    padx=4,
+                )
+        if self._can_manage_tasks():
+            status_name = str(task.get("status", ""))
+            if status_name == "Создана" and task.get("executor_user_id") is not None:
+                self._add_kanban_action_button(actions, "start", "Старт", lambda tid=task_id: self._kanban_task_action(tid, "start"))
+            elif status_name == "В работе":
+                self._add_kanban_action_button(actions, "pause", "Пауза", lambda tid=task_id: self._kanban_task_action(tid, "pause"))
+                self._add_kanban_action_button(
+                    actions,
+                    "complete",
+                    "Завершить",
+                    lambda tid=task_id: self._kanban_task_action(tid, "complete"),
+                    padx=4,
+                )
+            elif status_name == "Приостановлена":
+                self._add_kanban_action_button(actions, "resume", "Возобновить", lambda tid=task_id: self._kanban_task_action(tid, "resume"))
+                self._add_kanban_action_button(
+                    actions,
+                    "complete",
+                    "Завершить",
+                    lambda tid=task_id: self._kanban_task_action(tid, "complete"),
+                    padx=4,
+                )
+
+    def _add_kanban_action_button(
+        self,
+        parent: ttk.Frame,
+        action_key: str,
+        tooltip: str,
+        command: Any,
+        *,
+        padx: int = 0,
+    ) -> ttk.Button:
+        icon_image = self.icon_images.get(action_key)
+        if icon_image is None:
+            # Try one more time before rendering fallback text.
+            self._ensure_kanban_icons_ready()
+            icon_image = self.icon_images.get(action_key)
+        if icon_image is None:
+            fallback_text = {
+                "claim": "C",
+                "assign": "A",
+                "start": "S",
+                "pause": "P",
+                "resume": "R",
+                "complete": "D",
+            }.get(action_key, "?")
+            button = self._mk_button(parent, fallback_text, command, width=3, style="KanbanAction.TButton")
+        else:
+            button = self._mk_button(parent, "", command, width=4, style="KanbanAction.TButton")
+            button.configure(image=icon_image, compound="center")
+            button.image = icon_image
+        self._attach_tooltip(button, tooltip)
+        button.pack(side=LEFT, padx=padx)
+        return button
+
+    def _kanban_task_action(self, task_id: int, action: str) -> None:
+        try:
+            self.api.task_action(task_id, action)
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Изменение статуса не удалось.\n{exc}", parent=self)
+            return
+        self._load_dashboard_data()
+        self._refresh_kanban_board()
+
+    def _kanban_claim_task(self, task_id: int) -> None:
+        try:
+            self.api.claim_task(task_id)
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Принять задачу не удалось.\n{exc}", parent=self)
+            return
+        self._load_dashboard_data()
+        self._refresh_kanban_board()
+
+    def _open_kanban_assign_popup(self, task_id: int) -> None:
+        if not self._can_manage_tasks():
+            messagebox.showwarning("Недостаточно прав", "Назначение доступно для роли куратор и выше.", parent=self)
+            return
+        try:
+            users = [u for u in self.api.list_users() if int(u.get("is_active", 1)) == 1]
+        except ApiClientError as exc:
+            messagebox.showerror("Ошибка API", f"Не удалось загрузить пользователей.\n{exc}", parent=self)
+            return
+        if not users:
+            messagebox.showwarning("Назначение", "Активные пользователи не найдены.", parent=self)
+            return
+
+        labels = [f"{u.get('full_name', '')} (id:{u['id']})" for u in users]
+        label_to_id = {label: int(u["id"]) for label, u in zip(labels, users)}
+        w = self._create_popup(self)
+        w.title(f"Назначить исполнителя для задачи #{task_id}")
+        w.geometry("460x140")
+        body = ttk.Frame(w, padding=(12, 12))
+        body.pack(fill=BOTH, expand=True)
+        ttk.Label(body, text="Исполнитель *").pack(anchor="w")
+        selected_var = StringVar(value=labels[0])
+        ttk.Combobox(body, textvariable=selected_var, values=labels, state="readonly").pack(fill="x", pady=(4, 8))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+
+        def do_assign() -> None:
+            selected = selected_var.get().strip()
+            executor_id = label_to_id.get(selected)
+            if executor_id is None:
+                messagebox.showerror("Валидация", "Выберите исполнителя из списка.", parent=w)
+                return
+            try:
+                self.api.assign_task(task_id, executor_id)
+            except ApiClientError as exc:
+                messagebox.showerror("Ошибка API", f"Назначение не удалось.\n{exc}", parent=w)
+                return
+            w.destroy()
+            self._load_dashboard_data()
+            self._refresh_kanban_board()
+
+        self._mk_button(buttons, "Назначить", do_assign).pack(side=LEFT)
+        self._mk_button(buttons, "Отмена", w.destroy).pack(side=LEFT, padx=6)
 
     def _is_admin(self) -> bool:
         if not self.session_user:
@@ -1885,27 +2598,68 @@ class KanbanTkApp(Tk):
             return
         self._refresh_statuses_table()
 
-    def _fill_top_table(self, projects: list[dict[str, Any]]) -> None:
-        self.top_tree.delete(*self.top_tree.get_children())
-        rows_for_width: list[tuple[Any, ...]] = []
+    def _build_project_view_rows(self, projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
         for project in projects:
             pocket = self.pockets_by_id.get(int(project["pocket_id"]), {})
             owner = self.users_by_id.get(int(pocket.get("owner_user_id", 0)), {}).get("full_name", "")
             owner_it = self.users_by_id.get(int(project["curator_it_user_id"]), {}).get("full_name", "")
+            rows.append(
+                {
+                    "pocket_id": pocket.get("id", ""),
+                    "pocket_name": pocket.get("name", ""),
+                    "project_id": project["id"],
+                    "project_name": project["name"],
+                    "project_code": project.get("project_code", "") or "",
+                    "date_start": project.get("date_start") or "",
+                    "date_end": project.get("date_end") or "",
+                    "status": project.get("status") or "",
+                    "owner": owner,
+                    "owner_it": owner_it,
+                }
+            )
+        return rows
+
+    def _apply_project_table_filters(
+        self,
+        rows: list[dict[str, Any]],
+        conditions: list[FilterRowState],
+    ) -> list[dict[str, Any]]:
+        project_conditions = [c for c in conditions if c.field in PROJECT_FILTER_FIELDS]
+        if not project_conditions:
+            return rows
+        result = list(rows)
+        for idx, cond in enumerate(project_conditions):
+            logic = cond.logic if idx > 0 else "AND"
+            source_rows = result if logic == "AND" else rows
+            filtered = [r for r in source_rows if self._match_condition(r.get(cond.field), cond.op, cond.value)]
+            if idx == 0 or logic == "AND":
+                result = filtered
+            else:
+                ids = {int(r["project_id"]) for r in result}
+                for item in filtered:
+                    if int(item["project_id"]) not in ids:
+                        result.append(item)
+        return result
+
+    def _fill_top_table(self, project_rows: list[dict[str, Any]]) -> None:
+        self.top_tree.delete(*self.top_tree.get_children())
+        rows_for_width: list[tuple[Any, ...]] = []
+        for row in project_rows:
             values = (
-                pocket.get("id", ""),
-                pocket.get("name", ""),
-                project["id"],
-                project["name"],
-                project.get("project_code", "") or "",
-                project.get("date_start") or "",
-                project.get("date_end") or "",
-                project.get("status") or "",
-                owner,
-                owner_it,
+                row.get("pocket_id", ""),
+                row.get("pocket_name", ""),
+                row.get("project_id", ""),
+                row.get("project_name", ""),
+                row.get("project_code", ""),
+                row.get("date_start", ""),
+                row.get("date_end", ""),
+                row.get("status", ""),
+                row.get("owner", ""),
+                row.get("owner_it", ""),
             )
             rows_for_width.append(values)
-            self.top_tree.insert("", END, iid=str(project["id"]), values=values)
+            self.top_tree.insert("", END, iid=str(row.get("project_id")), values=values)
         self._autosize_tree_columns(
             self.top_tree,
             (
@@ -1924,11 +2678,79 @@ class KanbanTkApp(Tk):
             min_width=90,
             max_width_overrides={"project_name": 320, "owner": 220, "owner_it": 220},
         )
+        self._update_top_tree_height(len(rows_for_width))
+
+    def _update_top_tree_height(self, row_count: int) -> None:
+        # Top table height follows data volume; bottom table takes remaining space.
+        visible_rows = max(3, min(18, row_count if row_count > 0 else 3))
+        self.top_tree.configure(height=visible_rows)
+
+    def _reconcile_selected_project(self, project_rows: list[dict[str, Any]]) -> None:
+        available_ids = {int(r["project_id"]) for r in project_rows}
+        if self.selected_project_id is not None and self.selected_project_id not in available_ids:
+            self.selected_project_id = None
+            if "top_tree" in self.__dict__:
+                self.top_tree.selection_remove(*self.top_tree.selection())
+
+    def _refresh_dashboard_top_table_from_filter_context(self) -> None:
+        filtered_tasks = self._build_filtered_task_rows()
+        project_rows = self._build_top_rows_from_filtered_tasks(filtered_tasks)
+        project_rows = self._augment_top_rows_with_empty_projects(project_rows)
+        self._fill_top_table(project_rows)
+        self._reconcile_selected_project(project_rows)
+        if self.selected_project_id is not None and self.top_tree.exists(str(self.selected_project_id)):
+            self._suppress_top_select_event = True
+            try:
+                self.top_tree.selection_set(str(self.selected_project_id))
+                self.top_tree.focus(str(self.selected_project_id))
+            finally:
+                self._suppress_top_select_event = False
+
+    def _refresh_dashboard_bottom_table_from_selection_and_filter(self) -> None:
+        rows = self._build_filtered_task_rows()
+
+        self.bottom_tree.delete(*self.bottom_tree.get_children())
+        rows_for_width: list[tuple[Any, ...]] = []
+        for row in rows:
+            values = (
+                row.get("id", ""),
+                row.get("description", ""),
+                row.get("status", ""),
+                row.get("date_created", ""),
+                row.get("date_start_work", ""),
+                row.get("date_done", ""),
+                row.get("executor_full_name", ""),
+                row.get("customer", ""),
+                row.get("code_link", ""),
+            )
+            rows_for_width.append(values)
+            self.bottom_tree.insert("", END, iid=str(row.get("id")), values=values)
+        self._autosize_tree_columns(
+            self.bottom_tree,
+            (
+                "id",
+                "description",
+                "status",
+                "date_created",
+                "date_start_work",
+                "date_done",
+                "executor_full_name",
+                "customer",
+                "code_link",
+            ),
+            rows_for_width,
+            min_width=90,
+            max_width_overrides={"description": 520, "executor_full_name": 220, "customer": 180, "code_link": 220},
+        )
 
     def _on_top_select(self, _: object) -> None:
+        if self._in_filter_refresh or self._suppress_top_select_event:
+            return
         selected = self.top_tree.selection()
         self.selected_project_id = int(selected[0]) if selected else None
-        self._apply_filters()
+        self._refresh_dashboard_bottom_table_from_selection_and_filter()
+        self._refresh_kanban_board()
+        self._refresh_global_filter_indicators()
 
     def _on_top_double_click(self, event: object) -> None:
         region = self.top_tree.identify_region(getattr(event, "x"), getattr(event, "y"))
@@ -1970,10 +2792,26 @@ class KanbanTkApp(Tk):
         ttk.Label(body, text=text, justify=LEFT, style="Surface.TLabel").pack(fill=BOTH, expand=True)
 
     def _reset_filters(self) -> None:
-        for row in self.filter_rows:
-            row.frame.destroy()
-        self.filter_rows.clear()
+        self.global_filter_context.rows = [FilterRowState(logic="AND", field="status", op="!=", value="Завершена")]
+        self.global_filter_context.preset_name = DEFAULT_PRESET_NAME
+        self.global_filter_context.dashboard_visible = False
+        self.global_filter_context.kanban_visible = False
+        self.selected_project_id = None
+        if hasattr(self, "top_tree"):
+            self._suppress_top_select_event = True
+            try:
+                self.top_tree.selection_remove(*self.top_tree.selection())
+            finally:
+                self._suppress_top_select_event = False
+        self._apply_global_filter_context_to_zone("dashboard")
+        self._apply_global_filter_context_to_zone("kanban")
+        if hasattr(self, "preset_var"):
+            self.preset_var.set(DEFAULT_PRESET_NAME)
+        if hasattr(self, "kanban_preset_var"):
+            self.kanban_preset_var.set(DEFAULT_PRESET_NAME)
+        self._refresh_global_filter_indicators()
         self._apply_filters()
+        self._refresh_kanban_board()
 
     def _add_filter_row(
         self, field: str = "status", op: str = "==", value: str = "", logic: str = "AND"
@@ -2036,6 +2874,66 @@ class KanbanTkApp(Tk):
                 break
         self._apply_filters()
 
+    def _add_kanban_filter_row(
+        self, field: str = "executor_user_id", op: str = "==", value: str = "", logic: str = "AND"
+    ) -> None:
+        row = ttk.Frame(self.kanban_rows_holder)
+        row.pack(fill="x", pady=2)
+        logic_var = StringVar(value=logic)
+        field_var = StringVar(value=field)
+        op_var = StringVar(value=op)
+        value_var = StringVar(value=value)
+
+        if self.kanban_filter_rows:
+            ttk.Combobox(row, textvariable=logic_var, values=["AND", "OR"], width=6, state="readonly").pack(
+                side=LEFT, padx=2
+            )
+        else:
+            ttk.Label(row, text="").pack(side=LEFT, padx=2)
+
+        ttk.Combobox(
+            row,
+            textvariable=field_var,
+            values=[
+                "id",
+                "description",
+                "status",
+                "date_created",
+                "date_start_work",
+                "date_done",
+                "executor_full_name",
+                "executor_user_id",
+                "customer",
+                "code_link",
+                "project_id",
+                "project_name",
+                "pocket_id",
+                "pocket_name",
+            ],
+            width=18,
+            state="readonly",
+        ).pack(side=LEFT, padx=2)
+        ttk.Combobox(
+            row,
+            textvariable=op_var,
+            values=["==", "!=", "in", "contains", "between", ">", "<", ">=", "<="],
+            width=10,
+            state="readonly",
+        ).pack(side=LEFT, padx=2)
+        ttk.Entry(row, textvariable=value_var, width=36).pack(side=LEFT, padx=2)
+        self._mk_button(row, "x", lambda r=row: self._remove_kanban_filter_row(r), width=3).pack(side=LEFT, padx=2)
+
+        self.kanban_filter_rows.append(FilterRow(row, logic_var, field_var, op_var, value_var))
+        self._refresh_kanban_filter_indicator()
+
+    def _remove_kanban_filter_row(self, row_frame: ttk.Frame) -> None:
+        for idx, item in enumerate(self.kanban_filter_rows):
+            if item.frame == row_frame:
+                item.frame.destroy()
+                self.kanban_filter_rows.pop(idx)
+                break
+        self._apply_kanban_filters()
+
     def _build_task_view(self, task: dict[str, Any]) -> dict[str, Any]:
         project = self.projects_by_id.get(int(task["project_id"]), {})
         pocket = self.pockets_by_id.get(int(project.get("pocket_id", 0)), {})
@@ -2089,74 +2987,49 @@ class KanbanTkApp(Tk):
         return False
 
     def _apply_filters(self) -> None:
-        rows = [self._build_task_view(t) for t in self.tasks_all]
-        if self.selected_project_id is not None:
-            rows = [r for r in rows if int(r["project_id"]) == self.selected_project_id]
+        if self._in_filter_refresh:
+            return
+        self._in_filter_refresh = True
+        try:
+            self._sync_global_filter_context_from_rows(
+                self.filter_rows,
+                zone="dashboard",
+                preset_name=self.preset_var.get() if hasattr(self, "preset_var") else DEFAULT_PRESET_NAME,
+                visible=self.filter_visible,
+            )
+            self._apply_global_filter_context_to_zone("kanban")
+            if hasattr(self, "kanban_preset_var"):
+                preset_name = self.global_filter_context.preset_name
+                self.kanban_preset_var.set(preset_name if preset_name in self.kanban_presets else DEFAULT_PRESET_NAME)
+            self._refresh_dashboard_top_table_from_filter_context()
+            self._refresh_dashboard_bottom_table_from_selection_and_filter()
+            self._refresh_kanban_board()
+            self._refresh_global_filter_indicators()
+        finally:
+            self._in_filter_refresh = False
 
-        for idx, cond in enumerate(self.filter_rows):
+    def _apply_filter_rows_to_rows(self, rows: list[dict[str, Any]], filter_rows: list[FilterRow]) -> list[dict[str, Any]]:
+        result = list(rows)
+        for idx, cond in enumerate(filter_rows):
             field = cond.field_var.get()
             op = cond.op_var.get()
             raw = cond.value_var.get()
             if not field or not op:
                 continue
-            filtered = [r for r in rows if self._match_condition(r.get(field), op, raw)]
-            if idx == 0:
-                rows = filtered
-            elif cond.logic_var.get() == "AND":
-                rows = filtered
+            logic = cond.logic_var.get() if idx > 0 else "AND"
+            source_rows = result if logic == "AND" else rows
+            filtered = [r for r in source_rows if self._match_condition(r.get(field), op, raw)]
+            if idx == 0 or logic == "AND":
+                result = filtered
             else:
-                ids = {int(r["id"]) for r in rows}
+                ids = {int(r["id"]) for r in result}
                 for item in filtered:
                     if int(item["id"]) not in ids:
-                        rows.append(item)
-
-        self.bottom_tree.delete(*self.bottom_tree.get_children())
-        rows_for_width: list[tuple[Any, ...]] = []
-        for row in rows:
-            values = (
-                row.get("id", ""),
-                row.get("description", ""),
-                row.get("status", ""),
-                row.get("date_created", ""),
-                row.get("date_start_work", ""),
-                row.get("date_done", ""),
-                row.get("executor_full_name", ""),
-                row.get("customer", ""),
-                row.get("code_link", ""),
-            )
-            rows_for_width.append(values)
-            self.bottom_tree.insert("", END, iid=str(row.get("id")), values=values)
-        self._refresh_filter_indicator()
-        self._autosize_tree_columns(
-            self.bottom_tree,
-            (
-                "id",
-                "description",
-                "status",
-                "date_created",
-                "date_start_work",
-                "date_done",
-                "executor_full_name",
-                "customer",
-                "code_link",
-            ),
-            rows_for_width,
-            min_width=90,
-            max_width_overrides={"description": 520, "executor_full_name": 220, "customer": 180, "code_link": 220},
-        )
+                        result.append(item)
+        return result
 
     def _serialize_filters(self) -> list[dict[str, str]]:
-        payload: list[dict[str, str]] = []
-        for idx, row in enumerate(self.filter_rows):
-            payload.append(
-                {
-                    "logic": row.logic_var.get() if idx > 0 else "AND",
-                    "field": row.field_var.get(),
-                    "op": row.op_var.get(),
-                    "value": row.value_var.get(),
-                }
-            )
-        return payload
+        return self._serialize_filter_rows(self.filter_rows)
 
     def _load_presets(self) -> dict[str, Any]:
         path = _preset_file()
@@ -2205,7 +3078,15 @@ class KanbanTkApp(Tk):
             self.filter_panel.pack(fill="x", before=self.bottom_controls)
         else:
             self.filter_panel.pack_forget()
-        self._refresh_filter_indicator()
+        self._sync_global_filter_context_from_rows(
+            self.filter_rows,
+            zone="dashboard",
+            preset_name=name,
+            visible=self.filter_visible,
+        )
+        self._apply_global_filter_context_to_zone("kanban")
+        if hasattr(self, "kanban_preset_var"):
+            self.kanban_preset_var.set(name if name in self.kanban_presets else DEFAULT_PRESET_NAME)
 
     def _save_current_preset(self) -> None:
         name = simpledialog.askstring("Сохранить пресет", "Имя пресета:", parent=self)
@@ -2244,28 +3125,182 @@ class KanbanTkApp(Tk):
             self._apply_preset(DEFAULT_PRESET_NAME)
             self._apply_filters()
 
+    def _load_kanban_presets(self) -> dict[str, Any]:
+        path = _kanban_preset_file()
+        default_filters = [
+            {"logic": "AND", "field": "status", "op": "!=", "value": "\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0430"},
+        ]
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    data[DEFAULT_PRESET_NAME] = {
+                        "filter_visible": bool(data.get(DEFAULT_PRESET_NAME, {}).get("filter_visible", False)),
+                        "filters": default_filters,
+                    }
+                    self._save_kanban_presets(data)
+                    return data
+        presets = {
+            DEFAULT_PRESET_NAME: {
+                "filter_visible": False,
+                "filters": default_filters,
+            }
+        }
+        self._save_kanban_presets(presets)
+        return presets
+
+    def _save_kanban_presets(self, data: dict[str, Any]) -> None:
+        with open(_kanban_preset_file(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _refresh_kanban_preset_combo(self) -> None:
+        self.kanban_preset_combo["values"] = sorted(self.kanban_presets.keys())
+
+    def _apply_selected_kanban_preset(self) -> None:
+        self._apply_kanban_preset(self.kanban_preset_var.get())
+        self._refresh_kanban_board()
+
+    def _apply_kanban_preset(self, name: str) -> None:
+        preset = self.kanban_presets.get(name)
+        if not preset:
+            return
+        for row in self.kanban_filter_rows:
+            row.frame.destroy()
+        self.kanban_filter_rows.clear()
+        for cond in preset.get("filters", []):
+            self._add_kanban_filter_row(
+                field=cond.get("field", "executor_user_id"),
+                op=cond.get("op", "=="),
+                value=cond.get("value", ""),
+                logic=cond.get("logic", "AND"),
+            )
+        self.kanban_filter_visible = bool(preset.get("filter_visible", False))
+        if self.kanban_filter_visible:
+            self.kanban_filter_panel.pack(fill="x", before=self.kanban_bottom_controls)
+        else:
+            self.kanban_filter_panel.pack_forget()
+        self._sync_global_filter_context_from_rows(
+            self.kanban_filter_rows,
+            zone="kanban",
+            preset_name=name,
+            visible=self.kanban_filter_visible,
+        )
+        self._apply_global_filter_context_to_zone("dashboard")
+        if hasattr(self, "preset_var"):
+            self.preset_var.set(name if name in self.presets else DEFAULT_PRESET_NAME)
+
+    def _serialize_kanban_filters(self) -> list[dict[str, str]]:
+        return self._serialize_filter_rows(self.kanban_filter_rows)
+
+    def _save_current_kanban_preset(self) -> None:
+        name = simpledialog.askstring("Сохранить пресет", "Имя пресета:", parent=self)
+        if not name:
+            return
+        self.kanban_presets[name] = {
+            "filter_visible": self.kanban_filter_visible,
+            "filters": self._serialize_kanban_filters(),
+        }
+        self._save_kanban_presets(self.kanban_presets)
+        self._refresh_kanban_preset_combo()
+        self.kanban_preset_var.set(name)
+
+    def _rename_kanban_preset(self) -> None:
+        old = self.kanban_preset_var.get()
+        if old not in self.kanban_presets:
+            return
+        new = simpledialog.askstring("Переименовать пресет", "Новое имя:", initialvalue=old, parent=self)
+        if not new or new == old:
+            return
+        self.kanban_presets[new] = self.kanban_presets.pop(old)
+        self._save_kanban_presets(self.kanban_presets)
+        self._refresh_kanban_preset_combo()
+        self.kanban_preset_var.set(new)
+
+    def _delete_kanban_preset(self) -> None:
+        name = self.kanban_preset_var.get()
+        if name == DEFAULT_PRESET_NAME:
+            messagebox.showwarning("Ограничение", "Пресет по умолчанию удалить нельзя.")
+            return
+        if name in self.kanban_presets:
+            del self.kanban_presets[name]
+            self._save_kanban_presets(self.kanban_presets)
+            self._refresh_kanban_preset_combo()
+            self.kanban_preset_var.set(DEFAULT_PRESET_NAME)
+            self._apply_kanban_preset(DEFAULT_PRESET_NAME)
+            self._refresh_kanban_board()
+
     def _show_about(self) -> None:
         messagebox.showinfo("О программе", "Project Kanban Tkinter UI (MVP)")
 
     def _show_theme_info(self) -> None:
+        theme_file = _theme_file(self.theme_name)
+        base_ttk = str(self.theme_tokens.get("base_ttk_theme", "forest-light"))
         messagebox.showinfo(
             "Тема интерфейса",
             (
                 f"Активная тема: {self.theme_name}\n"
-                f"Файл темы: {_forest_theme_file(self.theme_name)}\n"
+                f"JSON темы: {theme_file}\n"
+                f"Базовая ttk-тема: {base_ttk}\n"
                 "Тема сохраняется в локальном ui_config.json."
             ),
         )
 
     def _on_theme_selected(self) -> None:
-        self._theme_in_development()
+        self._toggle_theme()
+
+    def _theme_button_text(self) -> str:
+        return "Тема: Светлая" if self.theme_name == "forest-light" else "Тема: Тёмная"
+
+    def _toggle_theme(self) -> None:
+        messagebox.showinfo("Тема", "Переключение темы временно отключено. Используется светлая тема.")
 
     def _set_theme(self, theme_name: str) -> None:
-        _ = theme_name
-        self._theme_in_development()
+        del theme_name
+        if self.theme_name != DEFAULT_THEME_NAME:
+            self.theme_tokens = self._load_theme_tokens_with_fallback(DEFAULT_THEME_NAME)
+            self.theme_name = DEFAULT_THEME_NAME
+            self.theme_var.set(self.theme_name)
+            self.role_colors = self._role_palette_for_theme(self.theme_name)
+            self._save_theme_name(self.theme_name)
+            self._rebuild_ui()
 
     def _theme_in_development(self) -> None:
-        messagebox.showinfo("В разработке", "Переключение темы временно отключено.")
+        self._toggle_theme()
+
+    def _resolve_kanban_icon_paths(self, theme_name: str) -> dict[str, str]:
+        _ = theme_name
+        icon_cfg = self.theme_tokens.get("icons", {}) if isinstance(self.theme_tokens, dict) else {}
+        palette = str(icon_cfg.get("palette", "light"))
+        source_dir = _icons_source_dir(palette)
+        paths: dict[str, str] = {}
+        missing: list[str] = []
+        for action_key, filename in KANBAN_ACTION_ICONS.items():
+            path = os.path.join(source_dir, f"{filename}.png")
+            if not os.path.exists(path):
+                missing.append(path)
+            else:
+                paths[action_key] = path
+        if missing:
+            raise FileNotFoundError("Missing icon files: " + ", ".join(missing))
+        return paths
+
+    def _load_kanban_icons(self, theme_name: str) -> None:
+        self.icon_images = {}
+        try:
+            icon_paths = self._resolve_kanban_icon_paths(theme_name)
+            for action_key, path in icon_paths.items():
+                self.icon_images[action_key] = PhotoImage(file=path)
+        except Exception as exc:
+            self.icon_images = {}
+            if not self._icon_error_shown:
+                self._icon_error_shown = True
+                messagebox.showerror("Иконки Kanban", f"Иконки не загружены: {exc}")
+
+    def _ensure_kanban_icons_ready(self) -> None:
+        required = set(KANBAN_ACTION_ICONS.keys())
+        if required.issubset(set(self.icon_images.keys())):
+            return
+        self._load_kanban_icons(self.theme_name)
 
     def _mk_button(self, parent: ttk.Frame, text: str, command: Any, **kwargs: Any) -> ttk.Button:
         btn = ttk.Button(
@@ -2289,22 +3324,13 @@ class KanbanTkApp(Tk):
         )
         opt.configure(width=20)
         menu_widget = self.nametowidget(opt["menu"])
-        if self.theme_name == "forest-dark":
-            menu_widget.configure(
-                tearoff=False,
-                bg="#313131",
-                fg="#ffffff",
-                activebackground="#217346",
-                activeforeground="#ffffff",
-            )
-        else:
-            menu_widget.configure(
-                tearoff=False,
-                bg="#ffffff",
-                fg="#1f2328",
-                activebackground="#217346",
-                activeforeground="#ffffff",
-            )
+        menu_widget.configure(
+            tearoff=False,
+            bg=self._theme_color("surface_panel", "#ffffff"),
+            fg=self._theme_color("text_primary", "#1f2328"),
+            activebackground=self._theme_color("accent", "#4F6B5A"),
+            activeforeground=self._theme_color("selection_fg", "#ffffff"),
+        )
         opt.pack(side=LEFT, padx=2)
 
     def _on_menu_option_selected(self, selected: str, var: StringVar, title: str) -> None:
@@ -2335,8 +3361,11 @@ class KanbanTkApp(Tk):
             tree.column(col, width=max(min_width, min(width, max_width)))
 
     def _format_filter_text(self) -> str:
+        return self._format_filter_text_for_rows(self.filter_rows)
+
+    def _format_filter_text_for_rows(self, rows: list[FilterRow]) -> str:
         parts: list[str] = []
-        for idx, cond in enumerate(self.filter_rows):
+        for idx, cond in enumerate(rows):
             field = cond.field_var.get().strip()
             op = cond.op_var.get().strip()
             value = cond.value_var.get().strip()
@@ -2351,13 +3380,10 @@ class KanbanTkApp(Tk):
         return " ".join(parts)
 
     def _refresh_filter_indicator(self) -> None:
-        full_text = self._format_filter_text()
-        self._filter_summary_full_text = full_text
-        if full_text == "Фильтр пуст":
-            self.filter_summary_var.set(full_text)
-            return
-        short_text = full_text if len(full_text) <= 100 else f"{full_text[:100].rstrip()}..."
-        self.filter_summary_var.set(short_text)
+        self._refresh_global_filter_indicators()
+
+    def _refresh_kanban_filter_indicator(self) -> None:
+        self._refresh_global_filter_indicators()
 
     def _show_filter_tooltip(self, _event: object) -> None:
         self._hide_filter_tooltip()
@@ -2377,8 +3403,52 @@ class KanbanTkApp(Tk):
             self._filter_tooltip.destroy()
         self._filter_tooltip = None
 
+    def _attach_tooltip(self, widget: ttk.Widget, text: str) -> None:
+        widget.bind("<Enter>", lambda event, tooltip_text=text: self._show_widget_tooltip(event, tooltip_text))
+        widget.bind("<Leave>", self._hide_widget_tooltip)
+        widget.bind("<ButtonPress>", self._hide_widget_tooltip)
+
+    def _show_widget_tooltip(self, event: object, text: str) -> None:
+        if not text:
+            return
+        self._hide_widget_tooltip()
+        widget = event.widget  # type: ignore[attr-defined]
+        x = widget.winfo_rootx() + 8
+        y = widget.winfo_rooty() - 30
+        tip = Toplevel(self)
+        tip.overrideredirect(True)
+        tip.geometry(f"+{x}+{y}")
+        tip.attributes("-topmost", True)
+        ttk.Label(tip, text=text, style="Surface.TLabel", padding=(8, 4)).pack()
+        self._widget_tooltip = tip
+
+    def _hide_widget_tooltip(self, _event: object | None = None) -> None:
+        if self._widget_tooltip and self._widget_tooltip.winfo_exists():
+            self._widget_tooltip.destroy()
+        self._widget_tooltip = None
+
+    def _show_kanban_filter_tooltip(self, _event: object) -> None:
+        self._hide_kanban_filter_tooltip()
+        if not self._kanban_filter_summary_full_text:
+            return
+        x = self.kanban_filter_label.winfo_rootx()
+        y = self.kanban_filter_label.winfo_rooty() - 30
+        tip = Toplevel(self)
+        tip.overrideredirect(True)
+        tip.geometry(f"+{x}+{y}")
+        tip.attributes("-topmost", True)
+        ttk.Label(tip, text=self._kanban_filter_summary_full_text, style="Surface.TLabel", padding=(8, 4)).pack()
+        self._kanban_filter_tooltip = tip
+
+    def _hide_kanban_filter_tooltip(self, _event: object | None = None) -> None:
+        if self._kanban_filter_tooltip and self._kanban_filter_tooltip.winfo_exists():
+            self._kanban_filter_tooltip.destroy()
+        self._kanban_filter_tooltip = None
+
     def _rebuild_ui(self) -> None:
         self._hide_filter_tooltip()
+        self._hide_kanban_filter_tooltip()
+        self._hide_widget_tooltip()
         self._close_pockets_window()
         self._close_projects_window()
         self._close_tasks_window()
@@ -2396,8 +3466,7 @@ class KanbanTkApp(Tk):
         self._load_dashboard_data()
 
     def _load_theme_name(self) -> str:
-        # Theme switch is temporarily disabled; keep UI on light forest.
-        return "forest-light"
+        return DEFAULT_THEME_NAME
 
     def _save_theme_name(self, theme_name: str) -> None:
         path = _ui_config_file()
@@ -2414,24 +3483,81 @@ class KanbanTkApp(Tk):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
+    def _load_theme_tokens(self, theme_name: str) -> dict[str, Any]:
+        path = _theme_file(theme_name)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("Theme JSON must be an object")
+        for key in ("id", "base_ttk_theme", "colors", "roles", "icons"):
+            if key not in data:
+                raise ValueError(f"Theme missing required key: {key}")
+        if not isinstance(data["colors"], dict) or not isinstance(data["roles"], dict) or not isinstance(data["icons"], dict):
+            raise ValueError("Theme keys colors/roles/icons must be objects")
+        return data
+
+    def _load_theme_tokens_with_fallback(self, theme_name: str) -> dict[str, Any]:
+        try:
+            return self._load_theme_tokens(theme_name)
+        except Exception:
+            try:
+                return self._load_theme_tokens(DEFAULT_THEME_NAME)
+            except Exception:
+                return dict(DEFAULT_THEME_TOKENS)
+
+    def _theme_color(self, key: str, default: str) -> str:
+        colors = self.theme_tokens.get("colors", {}) if isinstance(self.theme_tokens, dict) else {}
+        value = colors.get(key, default)
+        return str(value) if value else default
+
     def _role_palette_for_theme(self, theme_name: str) -> dict[str, str]:
-        return dict(THEME_CONFIGS.get(theme_name, THEME_CONFIGS["forest-light"]))
+        _ = theme_name
+        roles = self.theme_tokens.get("roles", {}) if isinstance(self.theme_tokens, dict) else {}
+        fallback_roles = DEFAULT_THEME_TOKENS["roles"]
+        merged = dict(fallback_roles)
+        if isinstance(roles, dict):
+            for key, value in roles.items():
+                merged[str(key)] = str(value)
+        return merged
 
     def _apply_theme_settings(self) -> None:
         style = ttk.Style(self)
-        style.configure("Session.TLabel", foreground=self.role_colors.get("executor", "#57606a"))
-        # Keep dropdown list popups aligned with light Forest defaults.
-        self.option_add("*TCombobox*Listbox.background", "#ffffff")
-        self.option_add("*TCombobox*Listbox.foreground", "#1f2328")
-        self.option_add("*TCombobox*Listbox.selectBackground", "#217346")
-        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        style.configure("Session.TLabel", foreground=self.role_colors.get("executor", self._theme_color("text_muted", "#5F6B6D")))
+        style.configure("TFrame", background=self._theme_color("surface_bg", "#F7F8F5"))
+        style.configure("Surface.TFrame", background=self._theme_color("surface_panel", "#FFFFFF"))
+        style.configure("TLabel", background=self._theme_color("surface_bg", "#F7F8F5"), foreground=self._theme_color("text_primary", "#1F2A2A"))
+        style.configure("Surface.TLabel", background=self._theme_color("surface_panel", "#FFFFFF"), foreground=self._theme_color("text_primary", "#1F2A2A"))
+        style.configure("TLabelframe", background=self._theme_color("surface_bg", "#F7F8F5"), bordercolor=self._theme_color("border", "#D8DDD8"))
+        style.configure("TLabelframe.Label", background=self._theme_color("surface_bg", "#F7F8F5"), foreground=self._theme_color("text_primary", "#1F2A2A"))
+        style.configure("KanbanColumn.TLabelframe", background=self._theme_color("surface_bg", "#F7F8F5"), bordercolor=self._theme_color("border", "#D8DDD8"))
+        style.configure("KanbanColumn.TLabelframe.Label", background=self._theme_color("surface_bg", "#F7F8F5"), foreground=self._theme_color("text_primary", "#1F2A2A"))
+        style.configure("Treeview", background=self._theme_color("surface_panel", "#FFFFFF"), fieldbackground=self._theme_color("surface_panel", "#FFFFFF"), foreground=self._theme_color("text_primary", "#1F2A2A"))
+        style.map("Treeview", background=[("selected", self._theme_color("selection_bg", "#6E8B74"))], foreground=[("selected", self._theme_color("selection_fg", "#FFFFFF"))])
+        style.configure("TEntry", fieldbackground=self._theme_color("surface_panel", "#FFFFFF"), foreground=self._theme_color("text_primary", "#1F2A2A"))
+        style.configure("TCombobox", fieldbackground=self._theme_color("surface_panel", "#FFFFFF"), foreground=self._theme_color("text_primary", "#1F2A2A"))
+        base_font = tkfont.nametofont("TkDefaultFont")
+        self.kanban_action_font = tkfont.Font(
+            family=base_font.actual("family"),
+            size=max(13, int(base_font.actual("size")) + 3),
+            weight="bold",
+        )
+        style.configure("KanbanAction.TButton", font=self.kanban_action_font, padding=(6, 4), background=self._theme_color("surface_panel", "#FFFFFF"))
+        style.map("KanbanAction.TButton", background=[("active", self._theme_color("accent_hover", "#3F594A"))], foreground=[("active", self._theme_color("selection_fg", "#FFFFFF"))])
+        self.option_add("*TCombobox*Listbox.background", self._theme_color("surface_panel", "#FFFFFF"))
+        self.option_add("*TCombobox*Listbox.foreground", self._theme_color("text_primary", "#1F2A2A"))
+        self.option_add("*TCombobox*Listbox.selectBackground", self._theme_color("selection_bg", "#6E8B74"))
+        self.option_add("*TCombobox*Listbox.selectForeground", self._theme_color("selection_fg", "#FFFFFF"))
+        for canvas in getattr(self, "kanban_column_canvases", {}).values():
+            canvas.configure(bg=self._theme_color("surface_bg", "#F7F8F5"))
+        self._load_kanban_icons(self.theme_name)
 
     def _setup_forest_theme(self) -> None:
         style = ttk.Style(self)
         try:
             self.tk.call("source", _forest_theme_file("forest-light").replace("\\", "/"))
             self.tk.call("source", _forest_theme_file("forest-dark").replace("\\", "/"))
-            style.theme_use(self.theme_name)
+            base_theme = str(self.theme_tokens.get("base_ttk_theme", "forest-light"))
+            style.theme_use(base_theme)
         except Exception as exc:
             messagebox.showwarning(
                 "Тема Forest недоступна",
