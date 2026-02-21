@@ -1,0 +1,29 @@
+{
+  "id": "forest-light",
+  "base_ttk_theme": "forest-light",
+  "colors": {
+    "surface_bg": "#F7F8F5",
+    "surface_panel": "#FFFFFF",
+    "text_primary": "#1F2A2A",
+    "text_muted": "#5F6B6D",
+    "accent": "#4F6B5A",
+    "accent_hover": "#3F594A",
+    "selection_bg": "#6E8B74",
+    "selection_fg": "#FFFFFF",
+    "border": "#D8DDD8",
+    "danger": "#B5483A",
+    "warning": "#B07A2F",
+    "info": "#3D6475",
+    "success": "#4E7A60"
+  },
+  "roles": {
+    "admin": "#B5483A",
+    "head": "#B07A2F",
+    "teamlead": "#3D6475",
+    "curator": "#4E7A60",
+    "executor": "#5F6B6D"
+  },
+  "icons": {
+    "palette": "light"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "id": "forest-dark",
+  "base_ttk_theme": "forest-dark",
+  "colors": {
+    "surface_bg": "#222826",
+    "surface_panel": "#2C3331",
+    "text_primary": "#E6ECE8",
+    "text_muted": "#B2BCB7",
+    "accent": "#7EA087",
+    "accent_hover": "#6B8E76",
+    "selection_bg": "#5F7F67",
+    "selection_fg": "#FFFFFF",
+    "border": "#3E4743",
+    "danger": "#E67B72",
+    "warning": "#D4AA63",
+    "info": "#7EA9C1",
+    "success": "#7BB58D"
+  },
+  "roles": {
+    "admin": "#E67B72",
+    "head": "#D4AA63",
+    "teamlead": "#7EA9C1",
+    "curator": "#7BB58D",
+    "executor": "#B2BCB7"
+  },
+  "icons": {
+    "palette": "dark"
+  }
+}

@@ -20,7 +20,7 @@ class Pocket:
     name: str
     date_start: str
     date_end: str | None
-    status: str
+    status_id: int
     owner_user_id: int
     department: str
 
@@ -30,7 +30,7 @@ class Project:
     id: int | None
     name: str
     pocket_id: int
-    status: str
+    status_id: int
     date_start: str
     date_end: str | None
     curator_business_user_id: int
@@ -42,7 +42,7 @@ class Task:
     id: int | None
     description: str
     project_id: int
-    status: str
+    status_id: int
     date_created: str
     date_start_work: str | None
     date_done: str | None

@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
     login TEXT UNIQUE NOT NULL,
     full_name TEXT NOT NULL,
     role TEXT NOT NULL,
-    is_active INTEGER NOT NULL DEFAULT 1
+    is_active INTEGER NOT NULL DEFAULT 1,
+    status_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS pockets (
@@ -27,18 +28,19 @@ CREATE TABLE IF NOT EXISTS pockets (
     name TEXT NOT NULL,
     date_start TEXT NOT NULL,
     date_end TEXT,
-    status TEXT NOT NULL,
+    status_id INTEGER NOT NULL,
     owner_user_id INTEGER NOT NULL,
     department TEXT NOT NULL,
     FOREIGN KEY(owner_user_id) REFERENCES users(id),
-    FOREIGN KEY(status) REFERENCES pocket_statuses(name)
+    FOREIGN KEY(status_id) REFERENCES statuses(id)
 );
 
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
+    project_code TEXT,
     pocket_id INTEGER NOT NULL,
-    status TEXT NOT NULL,
+    status_id INTEGER NOT NULL,
     date_start TEXT NOT NULL,
     date_end TEXT,
     curator_business_user_id INTEGER NOT NULL,
@@ -46,23 +48,23 @@ CREATE TABLE IF NOT EXISTS projects (
     FOREIGN KEY(pocket_id) REFERENCES pockets(id),
     FOREIGN KEY(curator_business_user_id) REFERENCES users(id),
     FOREIGN KEY(curator_it_user_id) REFERENCES users(id),
-    FOREIGN KEY(status) REFERENCES project_statuses(name)
+    FOREIGN KEY(status_id) REFERENCES statuses(id)
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     description TEXT NOT NULL,
     project_id INTEGER NOT NULL,
-    status TEXT NOT NULL,
+    status_id INTEGER NOT NULL,
     date_created TEXT NOT NULL,
     date_start_work TEXT,
     date_done TEXT,
-    executor_user_id INTEGER NOT NULL,
+    executor_user_id INTEGER,
     customer TEXT,
     code_link TEXT,
     FOREIGN KEY(project_id) REFERENCES projects(id),
     FOREIGN KEY(executor_user_id) REFERENCES users(id),
-    FOREIGN KEY(status) REFERENCES task_statuses(name)
+    FOREIGN KEY(status_id) REFERENCES statuses(id)
 );
 
 CREATE TABLE IF NOT EXISTS task_pauses (
@@ -86,16 +88,14 @@ CREATE TABLE IF NOT EXISTS action_log (
     FOREIGN KEY(user_id) REFERENCES users(id)
 );
 
-CREATE TABLE IF NOT EXISTS pocket_statuses (
-    name TEXT PRIMARY KEY
-);
-
-CREATE TABLE IF NOT EXISTS project_statuses (
-    name TEXT PRIMARY KEY
-);
-
-CREATE TABLE IF NOT EXISTS task_statuses (
-    name TEXT PRIMARY KEY
+CREATE TABLE IF NOT EXISTS statuses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 100,
+    is_system INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -105,16 +105,19 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA_SQL)
     conn.executemany(
-        "INSERT OR IGNORE INTO pocket_statuses(name) VALUES (?)",
-        [("Запущен",), ("Завершён",)],
-    )
-    conn.executemany(
-        "INSERT OR IGNORE INTO project_statuses(name) VALUES (?)",
-        [("Активен",), ("Завершён",)],
-    )
-    conn.executemany(
-        "INSERT OR IGNORE INTO task_statuses(name) VALUES (?)",
-        [("Создана",), ("В работе",), ("Приостановлена",), ("Завершена",)],
+        "INSERT OR IGNORE INTO statuses(entity_type, code, name, is_active, sort_order, is_system) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("pocket", "running", "Запущен", 1, 10, 1),
+            ("pocket", "done", "Завершён", 1, 20, 1),
+            ("project", "active", "Активен", 1, 10, 1),
+            ("project", "done", "Завершён", 1, 20, 1),
+            ("task", "created", "Создана", 1, 10, 1),
+            ("task", "in_progress", "В работе", 1, 20, 1),
+            ("task", "paused", "Приостановлена", 1, 30, 1),
+            ("task", "done", "Завершена", 1, 40, 1),
+            ("user", "active", "Активен", 1, 10, 1),
+            ("user", "inactive", "Неактивен", 1, 20, 1),
+        ],
     )
     conn.commit()
 

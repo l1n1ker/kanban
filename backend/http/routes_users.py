@@ -57,3 +57,14 @@ def update_user(user_id: int, payload: UserUpdate, svc: Services = Depends(get_s
         return result
     except Exception as exc:
         handle_service_exception(exc)
+
+
+@router.delete("/{user_id}", response_model=UserOut)
+def deactivate_user(user_id: int, svc: Services = Depends(get_services)) -> dict:
+    try:
+        result = svc.deactivate_user(user_id)
+        if not result:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        return result
+    except Exception as exc:
+        handle_service_exception(exc)

@@ -1,133 +1,140 @@
-# Схема БД (логическая)
+# Схема БД (логическая, Sprint 2)
 
-Документ описывает логическую схему данных Sprint 1.
-Опирается строго на `md_docs/architecture.md`.
-SQL и оптимизации не используются.
+Документ описывает целевую логическую схему данных Sprint 2.
+Опирается на `md_docs/architecture.md`, `md_docs/tasks_rules.md`, `md_docs/wip_rules.md`.
 
 ---
 
-## Таблицы (основные сущности)
+## 1. Основные таблицы
 
-### 1. users (Пользователь)
+### 1.1 users (Пользователь)
+
 Поля:
+
 - `id` — идентификатор
 - `login` — Windows-логин (уникальный)
 - `full_name` — ФИО
-- `role` — роль пользователя (строка из фиксированного набора)
-- `is_active` — активен/неактивен (логическое поле)
+- `role` — роль пользователя (`admin` / `head` / `teamlead` / `curator` / `executor`)
+- `status_id` — статус пользователя (FK -> `statuses.id`, `entity_type = user`)
 
-Фиксированный набор ролей (без справочника):
-- `admin`
-- `head`
-- `teamlead`
-- `curator`
-- `executor`
+### 1.2 pockets (Карман)
 
-### 2. pockets (Карман)
 Поля:
+
 - `id` — идентификатор
 - `name` — наименование
-- `date_start` — дата_начала (дата, календарные дни)
-- `date_end` — дата_окончания (дата, календарные дни)
-- `status` — статус (ссылка на справочник `pocket_statuses`)
-- `owner_user_id` — ответственный (ссылка на `users.id`)
-- `department` — подразделение (строка)
+- `date_start` — дата начала
+- `date_end` — дата окончания
+- `status_id` — статус кармана (FK -> `statuses.id`, `entity_type = pocket`)
+- `owner_user_id` — ответственный (FK -> `users.id`)
+- `department` — подразделение
 
-### 3. projects (Проект)
+### 1.3 projects (Проект)
+
 Поля:
+
 - `id` — идентификатор
 - `name` — наименование
-- `pocket_id` — id_кармана (ссылка на `pockets.id`)
-- `status` — статус (ссылка на справочник `project_statuses`)
-- `date_start` — дата_начала (дата, календарные дни)
-- `date_end` — дата_окончания (дата, календарные дни)
-- `curator_business_user_id` — куратор_бизнес (ссылка на `users.id`)
-- `curator_it_user_id` — куратор_ит (ссылка на `users.id`)
+- `pocket_id` — карман (FK -> `pockets.id`)
+- `status_id` — статус проекта (FK -> `statuses.id`, `entity_type = project`)
+- `date_start` — дата начала
+- `date_end` — дата окончания
+- `curator_business_user_id` — куратор бизнес (FK -> `users.id`)
+- `curator_it_user_id` — куратор ИТ (FK -> `users.id`)
 
-### 4. tasks (Задача)
-Поля:
-- `id` — идентификатор
-- `description` — описание (текст)
-- `project_id` — id_проекта (ссылка на `projects.id`)
-- `status` — статус (ссылка на справочник `task_statuses`)
-- `date_created` — дата_создания (дата, календарные дни)
-- `date_start_work` — дата_начала_работы (дата, календарные дни)
-- `date_done` — дата_завершения (дата, календарные дни)
-- `executor_user_id` — исполнитель (ссылка на `users.id`; на старте один исполнитель)
-- `customer` — заказчик (строка)
-- `code_link` — ссылка_на_код (строка/URL)
+### 1.4 tasks (Задача)
 
-### 5. task_pauses (Приостановки задач)
 Поля:
-- `id` — идентификатор
-- `task_id` — id_задачи (ссылка на `tasks.id`)
-- `date_start` — дата_начала (дата, календарные дни)
-- `date_end` — дата_окончания (дата, календарные дни)
 
-### 6. action_log (Журнал действий)
-Поля:
 - `id` — идентификатор
-- `timestamp` — дата и время события (datetime)
-- `user_id` — пользователь (ссылка на `users.id`)
-- `entity_type` — тип сущности (pocket / project / task / user)
+- `description` — описание
+- `project_id` — проект (FK -> `projects.id`)
+- `status_id` — статус задачи (FK -> `statuses.id`, `entity_type = task`)
+- `date_created` — дата создания
+- `date_start_work` — дата начала работы
+- `date_done` — дата завершения
+- `executor_user_id` — исполнитель (FK -> `users.id`)
+- `customer` — заказчик
+- `code_link` — ссылка на код
+
+### 1.5 task_pauses (Приостановки задач)
+
+Поля:
+
+- `id` — идентификатор
+- `task_id` — задача (FK -> `tasks.id`)
+- `date_start` — дата начала паузы
+- `date_end` — дата окончания паузы
+
+### 1.6 action_log (Журнал действий)
+
+Поля:
+
+- `id` — идентификатор
+- `timestamp` — дата/время события
+- `user_id` — пользователь (FK -> `users.id`)
+- `entity_type` — тип сущности (`pocket` / `project` / `task` / `user`)
 - `entity_id` — идентификатор сущности
 - `action_type` — тип действия
-  - `create`
-  - `update_status`
-  - `assign`
-  - `pause_start`
-  - `pause_end`
-  - `close`
-  - `edit`
-- `old_value` — предыдущее значение (текст, nullable)
-- `new_value` — новое значение (текст, nullable)
-- `comment` — комментарий пользователя (опционально)
+- `old_value` — предыдущее значение (nullable)
+- `new_value` — новое значение (nullable)
+- `comment` — комментарий (nullable)
+
+Допустимые `action_type`:
+
+- `create`
+- `update_status`
+- `assign`
+- `pause_start`
+- `pause_end`
+- `close`
+- `edit`
 
 ---
 
-## Таблицы (справочники)
+## 2. Справочники
 
-### A. pocket_statuses
-Справочник статусов кармана:
-- `Запущен`
-- `Завершён`
+### 2.1 statuses (Единый справочник статусов)
 
-### B. project_statuses
-Справочник статусов проекта:
-- `Активен`
-- `Завершён`
+Поля:
 
-### C. task_statuses
-Справочник статусов задачи:
-- `Создана`
-- `В работе`
-- `Приостановлена`
-- `Завершена`
+- `id` — идентификатор
+- `name` — наименование статуса
+- `entity_type` — тип сущности (`pocket` / `project` / `task` / `user`)
+- `sort_order` — порядок отображения (опционально)
+- `is_active` — признак активности статуса (опционально)
 
----
+Нормативные наборы:
 
-## Связи между таблицами
-
-- `users (1) -> pockets (many)`
-  - `pockets.owner_user_id` ссылается на `users.id`.
-- `users (1) -> projects (many)`
-  - `projects.curator_business_user_id` ссылается на `users.id`.
-  - `projects.curator_it_user_id` ссылается на `users.id`.
-- `users (1) -> tasks (many)`
-  - `tasks.executor_user_id` ссылается на `users.id`.
-- `users (1) -> action_log (many)`
-  - `action_log.user_id` ссылается на `users.id`.
-- `pockets (1) -> projects (many)`
-  - `projects.pocket_id` ссылается на `pockets.id`.
-- `projects (1) -> tasks (many)`
-  - `tasks.project_id` ссылается на `projects.id`.
-- `tasks (1) -> task_pauses (many)`
-  - `task_pauses.task_id` ссылается на `tasks.id`.
+- `entity_type = pocket`: `Запущен`, `Завершен`
+- `entity_type = project`: `Активен`, `Завершен`
+- `entity_type = task`: `Создана`, `В работе`, `Приостановлена`, `Завершена`
+- `entity_type = user`: `Активен`, `Неактивен`
 
 ---
 
-## Ограничения и правила (без автоматизации)
+## 3. Связи
 
-- Все даты учитываются в календарных днях.
-- В задаче всегда один исполнитель на старте.
-- Схема не предусматривает автоматические механизмы, рекомендации или оптимизации.
+- `users (1) -> pockets (many)` через `pockets.owner_user_id`
+- `users (1) -> projects (many)` через `projects.curator_business_user_id`, `projects.curator_it_user_id`
+- `users (1) -> tasks (many)` через `tasks.executor_user_id`
+- `users (1) -> action_log (many)` через `action_log.user_id`
+- `pockets (1) -> projects (many)` через `projects.pocket_id`
+- `projects (1) -> tasks (many)` через `tasks.project_id`
+- `tasks (1) -> task_pauses (many)` через `task_pauses.task_id`
+- `statuses (1) -> users/pockets/projects/tasks (many)` через соответствующие `status_id`
+
+---
+
+## 4. Ограничения и правила
+
+- Все даты ведутся в календарных днях.
+- В задаче на старте один исполнитель.
+- Жизненный цикл задач и допустимые переходы определяются `md_docs/architecture.md` и `md_docs/tasks_rules.md`.
+- Схема не включает автоматическую оптимизацию и рекомендации.
+
+---
+
+## 5. Устаревшие элементы
+
+Таблицы `pocket_statuses`, `project_statuses`, `task_statuses` считаются устаревшими и не являются нормативными для Sprint 2.

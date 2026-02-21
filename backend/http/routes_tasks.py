@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from backend.http.common import get_services, handle_service_exception
-from backend.http.schemas import TaskCreate, TaskOut, TaskStatusAction, TaskUpdate
+from backend.http.schemas import TaskAssignIn, TaskCreate, TaskOut, TaskStatusAction, TaskUpdate
 from backend.services import Services
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -94,6 +94,28 @@ def resume_task(task_id: int, payload: TaskStatusAction, svc: Services = Depends
 def complete_task(task_id: int, payload: TaskStatusAction, svc: Services = Depends(get_services)) -> dict:
     try:
         result = svc.complete_task(task_id, comment=payload.comment)
+        if not result:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+        return result
+    except Exception as exc:
+        handle_service_exception(exc)
+
+
+@router.post("/{task_id}/claim", response_model=TaskOut)
+def claim_task(task_id: int, payload: TaskStatusAction, svc: Services = Depends(get_services)) -> dict:
+    try:
+        result = svc.claim_task(task_id, comment=payload.comment)
+        if not result:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+        return result
+    except Exception as exc:
+        handle_service_exception(exc)
+
+
+@router.post("/{task_id}/assign", response_model=TaskOut)
+def assign_task(task_id: int, payload: TaskAssignIn, svc: Services = Depends(get_services)) -> dict:
+    try:
+        result = svc.assign_task(task_id, executor_user_id=payload.executor_user_id, comment=payload.comment)
         if not result:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
         return result
