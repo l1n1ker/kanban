@@ -61,14 +61,13 @@ class PocketsRepo:
     def create(self, *, actor_user_id: int, data: dict[str, Any]) -> dict[str, Any]:
         cur = self.conn.execute(
             """
-            INSERT INTO pockets (name, date_start, date_end, status, status_id, owner_user_id, department)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO pockets (name, date_start, date_end, status_id, owner_user_id, department)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 data["name"],
                 data["date_start"],
                 data["date_end"],
-                data["status"],
                 data.get("status_id"),
                 data["owner_user_id"],
                 data["department"],
@@ -80,11 +79,9 @@ class PocketsRepo:
         row = self.conn.execute("SELECT * FROM pockets WHERE id = ?", (pocket_id,)).fetchone()
         return row_to_dict(row) if row else {}
 
-    def list(self, *, status: str | None = None, status_id: int | None = None) -> list[dict[str, Any]]:
+    def list(self, *, status_id: int | None = None) -> list[dict[str, Any]]:
         if status_id is not None:
             rows = self.conn.execute("SELECT * FROM pockets WHERE status_id = ?", (status_id,)).fetchall()
-        elif status:
-            rows = self.conn.execute("SELECT * FROM pockets WHERE status = ?", (status,)).fetchall()
         else:
             rows = self.conn.execute("SELECT * FROM pockets").fetchall()
         return [row_to_dict(r) for r in rows]
@@ -110,14 +107,13 @@ class ProjectsRepo:
     def create(self, *, actor_user_id: int, data: dict[str, Any]) -> dict[str, Any]:
         cur = self.conn.execute(
             """
-            INSERT INTO projects (name, project_code, pocket_id, status, status_id, date_start, date_end, curator_business_user_id, curator_it_user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO projects (name, project_code, pocket_id, status_id, date_start, date_end, curator_business_user_id, curator_it_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["name"],
                 data.get("project_code"),
                 data["pocket_id"],
-                data["status"],
                 data.get("status_id"),
                 data["date_start"],
                 data["date_end"],
@@ -135,7 +131,6 @@ class ProjectsRepo:
         self,
         *,
         pocket_id: int | None = None,
-        status: str | None = None,
         status_id: int | None = None,
     ) -> list[dict[str, Any]]:
         query = "SELECT * FROM projects"
@@ -147,9 +142,6 @@ class ProjectsRepo:
         if status_id is not None:
             conditions.append("status_id = ?")
             params.append(status_id)
-        elif status:
-            conditions.append("status = ?")
-            params.append(status)
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         rows = self.conn.execute(query, params).fetchall()
@@ -176,13 +168,12 @@ class TasksRepo:
     def create(self, *, actor_user_id: int, data: dict[str, Any]) -> dict[str, Any]:
         cur = self.conn.execute(
             """
-            INSERT INTO tasks (description, project_id, status, status_id, date_created, date_start_work, date_done, executor_user_id, customer, code_link)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks (description, project_id, status_id, date_created, date_start_work, date_done, executor_user_id, customer, code_link)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["description"],
                 data["project_id"],
-                data["status"],
                 data.get("status_id"),
                 data["date_created"],
                 data.get("date_start_work"),
@@ -202,7 +193,6 @@ class TasksRepo:
         self,
         *,
         project_id: int | None = None,
-        status: str | None = None,
         status_id: int | None = None,
         executor_user_id: int | None = None,
     ) -> list[dict[str, Any]]:
@@ -215,9 +205,6 @@ class TasksRepo:
         if status_id is not None:
             conditions.append("status_id = ?")
             params.append(status_id)
-        elif status:
-            conditions.append("status = ?")
-            params.append(status)
         if executor_user_id is not None:
             conditions.append("executor_user_id = ?")
             params.append(executor_user_id)

@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class UserCreate(BaseModel):
@@ -36,7 +36,11 @@ class PocketCreate(BaseModel):
     name: str
     date_start: date
     date_end: Optional[date] = None
-    status: Literal["Запущен", "Завершён"]
+    status: Optional[Literal["Запущен", "Завершён"]] = Field(
+        default=None,
+        deprecated=True,
+        description="Compatibility input for one release. Use status_id.",
+    )
     status_id: Optional[int] = None
     owner_user_id: int
     department: str
@@ -46,7 +50,11 @@ class PocketUpdate(BaseModel):
     name: Optional[str] = None
     date_start: Optional[date] = None
     date_end: Optional[date] = None
-    status: Optional[Literal["Запущен", "Завершён"]] = None
+    status: Optional[Literal["Запущен", "Завершён"]] = Field(
+        default=None,
+        deprecated=True,
+        description="Compatibility input for one release. Use status_id.",
+    )
     status_id: Optional[int] = None
     owner_user_id: Optional[int] = None
     department: Optional[str] = None
@@ -57,7 +65,10 @@ class PocketOut(BaseModel):
     name: str
     date_start: date
     date_end: Optional[date]
-    status: Literal["Запущен", "Завершён"]
+    status: Literal["Запущен", "Завершён"] = Field(
+        deprecated=True,
+        description="Derived compatibility field for one release (from status_id).",
+    )
     status_id: Optional[int] = None
     status_name: Optional[str] = None
     owner_user_id: int
@@ -68,7 +79,11 @@ class ProjectCreate(BaseModel):
     name: str
     project_code: Optional[str] = None
     pocket_id: int
-    status: Literal["Активен", "Завершён"]
+    status: Optional[Literal["Активен", "Завершён"]] = Field(
+        default=None,
+        deprecated=True,
+        description="Compatibility input for one release. Use status_id.",
+    )
     status_id: Optional[int] = None
     date_start: date
     date_end: Optional[date] = None
@@ -80,7 +95,11 @@ class ProjectUpdate(BaseModel):
     name: Optional[str] = None
     project_code: Optional[str] = None
     pocket_id: Optional[int] = None
-    status: Optional[Literal["Активен", "Завершён"]] = None
+    status: Optional[Literal["Активен", "Завершён"]] = Field(
+        default=None,
+        deprecated=True,
+        description="Compatibility input for one release. Use status_id.",
+    )
     status_id: Optional[int] = None
     date_start: Optional[date] = None
     date_end: Optional[date] = None
@@ -93,7 +112,10 @@ class ProjectOut(BaseModel):
     name: str
     project_code: Optional[str]
     pocket_id: int
-    status: Literal["Активен", "Завершён"]
+    status: Literal["Активен", "Завершён"] = Field(
+        deprecated=True,
+        description="Derived compatibility field for one release (from status_id).",
+    )
     status_id: Optional[int] = None
     status_name: Optional[str] = None
     date_start: date
@@ -124,7 +146,10 @@ class TaskOut(BaseModel):
     id: int
     project_id: int
     description: str
-    status: Literal["Создана", "В работе", "Приостановлена", "Завершена"]
+    status: Literal["Создана", "В работе", "Приостановлена", "Завершена"] = Field(
+        deprecated=True,
+        description="Derived compatibility field for one release (from status_id).",
+    )
     status_id: Optional[int] = None
     status_name: Optional[str] = None
     date_created: date

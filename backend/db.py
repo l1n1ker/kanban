@@ -16,18 +16,6 @@ def get_connection() -> sqlite3.Connection:
 
 def _seed_reference_data(conn: sqlite3.Connection) -> None:
     conn.executemany(
-        "INSERT OR IGNORE INTO pocket_statuses(name) VALUES (?)",
-        [("Запущен",), ("Завершён",)],
-    )
-    conn.executemany(
-        "INSERT OR IGNORE INTO project_statuses(name) VALUES (?)",
-        [("Активен",), ("Завершён",)],
-    )
-    conn.executemany(
-        "INSERT OR IGNORE INTO task_statuses(name) VALUES (?)",
-        [("Создана",), ("В работе",), ("Приостановлена",), ("Завершена",)],
-    )
-    conn.executemany(
         """
         INSERT OR IGNORE INTO statuses(entity_type, code, name, is_active, sort_order, is_system)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -70,7 +58,7 @@ def _migrate_tasks_executor_nullable(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             description TEXT NOT NULL,
             project_id INTEGER NOT NULL,
-            status TEXT NOT NULL,
+            status_id INTEGER NOT NULL,
             date_created TEXT NOT NULL,
             date_start_work TEXT,
             date_done TEXT,
@@ -79,12 +67,26 @@ def _migrate_tasks_executor_nullable(conn: sqlite3.Connection) -> None:
             code_link TEXT,
             FOREIGN KEY(project_id) REFERENCES projects(id),
             FOREIGN KEY(executor_user_id) REFERENCES users(id),
-            FOREIGN KEY(status) REFERENCES task_statuses(name)
+            FOREIGN KEY(status_id) REFERENCES statuses(id)
         );
 
-        INSERT INTO tasks_new (id, description, project_id, status, date_created, date_start_work, date_done, executor_user_id, customer, code_link)
-        SELECT id, description, project_id, status, date_created, date_start_work, date_done, executor_user_id, customer, code_link
-        FROM tasks;
+        INSERT INTO tasks_new (id, description, project_id, status_id, date_created, date_start_work, date_done, executor_user_id, customer, code_link)
+        SELECT
+            t.id,
+            t.description,
+            t.project_id,
+            COALESCE(
+                t.status_id,
+                (SELECT s.id FROM statuses s WHERE s.entity_type = 'task' AND s.name = t.status LIMIT 1),
+                (SELECT s.id FROM statuses s WHERE s.entity_type = 'task' AND s.name = 'Создана' LIMIT 1)
+            ) AS status_id,
+            t.date_created,
+            t.date_start_work,
+            t.date_done,
+            t.executor_user_id,
+            t.customer,
+            t.code_link
+        FROM tasks t;
 
         DROP TABLE tasks;
         ALTER TABLE tasks_new RENAME TO tasks;
@@ -127,34 +129,37 @@ def _migrate_statuses_model(conn: sqlite3.Connection) -> None:
     if not _table_has_column(conn, "tasks", "status_id"):
         conn.execute("ALTER TABLE tasks ADD COLUMN status_id INTEGER")
 
-    # Backfill entity status ids from legacy text columns.
-    conn.execute(
-        """
-        UPDATE pockets
-        SET status_id = (
-            SELECT s.id FROM statuses s WHERE s.entity_type = 'pocket' AND s.name = pockets.status LIMIT 1
+    # Backfill entity status ids from legacy text columns when present.
+    if _table_has_column(conn, "pockets", "status"):
+        conn.execute(
+            """
+            UPDATE pockets
+            SET status_id = (
+                SELECT s.id FROM statuses s WHERE s.entity_type = 'pocket' AND s.name = pockets.status LIMIT 1
+            )
+            WHERE status_id IS NULL
+            """
         )
-        WHERE status_id IS NULL
-        """
-    )
-    conn.execute(
-        """
-        UPDATE projects
-        SET status_id = (
-            SELECT s.id FROM statuses s WHERE s.entity_type = 'project' AND s.name = projects.status LIMIT 1
+    if _table_has_column(conn, "projects", "status"):
+        conn.execute(
+            """
+            UPDATE projects
+            SET status_id = (
+                SELECT s.id FROM statuses s WHERE s.entity_type = 'project' AND s.name = projects.status LIMIT 1
+            )
+            WHERE status_id IS NULL
+            """
         )
-        WHERE status_id IS NULL
-        """
-    )
-    conn.execute(
-        """
-        UPDATE tasks
-        SET status_id = (
-            SELECT s.id FROM statuses s WHERE s.entity_type = 'task' AND s.name = tasks.status LIMIT 1
+    if _table_has_column(conn, "tasks", "status"):
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status_id = (
+                SELECT s.id FROM statuses s WHERE s.entity_type = 'task' AND s.name = tasks.status LIMIT 1
+            )
+            WHERE status_id IS NULL
+            """
         )
-        WHERE status_id IS NULL
-        """
-    )
     conn.execute(
         """
         UPDATE users
@@ -169,52 +174,27 @@ def _migrate_statuses_model(conn: sqlite3.Connection) -> None:
     )
 
 
-def _sync_status_columns(conn: sqlite3.Connection) -> None:
-    # Keep legacy text status columns consistent with canonical status_id during compatibility period.
-    conn.execute(
-        """
-        UPDATE pockets
-        SET status = (
-            SELECT s.name FROM statuses s
-            WHERE s.id = pockets.status_id AND s.entity_type = 'pocket'
+def _validate_status_consistency(conn: sqlite3.Connection) -> None:
+    for table_name, entity_type in (("pockets", "pocket"), ("projects", "project"), ("tasks", "task")):
+        if not _table_has_column(conn, table_name, "status"):
+            continue
+        rows = conn.execute(
+            f"""
+            SELECT t.id
+            FROM {table_name} t
+            JOIN statuses s ON s.id = t.status_id
+            WHERE t.status IS NOT NULL
+              AND t.status_id IS NOT NULL
+              AND s.entity_type = ?
+              AND t.status <> s.name
             LIMIT 1
-        )
-        WHERE status_id IS NOT NULL
-        """
-    )
-    conn.execute(
-        """
-        UPDATE projects
-        SET status = (
-            SELECT s.name FROM statuses s
-            WHERE s.id = projects.status_id AND s.entity_type = 'project'
-            LIMIT 1
-        )
-        WHERE status_id IS NOT NULL
-        """
-    )
-    conn.execute(
-        """
-        UPDATE tasks
-        SET status = (
-            SELECT s.name FROM statuses s
-            WHERE s.id = tasks.status_id AND s.entity_type = 'task'
-            LIMIT 1
-        )
-        WHERE status_id IS NOT NULL
-        """
-    )
-    # Mirror user status to boolean activity flag while both fields are present.
-    conn.execute(
-        """
-        UPDATE users
-        SET is_active = CASE
-            WHEN status_id = (SELECT id FROM statuses WHERE entity_type = 'user' AND name = 'Активен' LIMIT 1) THEN 1
-            ELSE 0
-        END
-        WHERE status_id IS NOT NULL
-        """
-    )
+            """,
+            (entity_type,),
+        ).fetchall()
+        if rows:
+            raise RuntimeError(
+                f"Status mismatch detected in table '{table_name}': legacy status text differs from status_id mapping"
+            )
 
 
 def _validate_status_model(conn: sqlite3.Connection) -> None:
@@ -237,6 +217,37 @@ def _validate_status_model(conn: sqlite3.Connection) -> None:
         ).fetchone()
         if row is None:
             raise RuntimeError(f"Missing required status '{name}' for entity_type '{entity_type}'")
+
+    checks = (
+        ("users",),
+        ("pockets",),
+        ("projects",),
+        ("tasks",),
+    )
+    for (table_name,) in checks:
+        row = conn.execute(f"SELECT id FROM {table_name} WHERE status_id IS NULL LIMIT 1").fetchone()
+        if row is not None:
+            raise RuntimeError(f"Null status_id detected in table '{table_name}'")
+
+    entity_checks = (
+        ("users", "user"),
+        ("pockets", "pocket"),
+        ("projects", "project"),
+        ("tasks", "task"),
+    )
+    for table_name, entity_type in entity_checks:
+        row = conn.execute(
+            f"""
+            SELECT t.id
+            FROM {table_name} t
+            JOIN statuses s ON s.id = t.status_id
+            WHERE s.entity_type <> ?
+            LIMIT 1
+            """,
+            (entity_type,),
+        ).fetchone()
+        if row is not None:
+            raise RuntimeError(f"Invalid status_id entity_type mapping in table '{table_name}'")
 
 
 
@@ -261,12 +272,10 @@ def init_db() -> None:
             name TEXT NOT NULL,
             date_start TEXT NOT NULL,
             date_end TEXT,
-            status TEXT NOT NULL,
-            status_id INTEGER,
+            status_id INTEGER NOT NULL,
             owner_user_id INTEGER NOT NULL,
             department TEXT NOT NULL,
             FOREIGN KEY(owner_user_id) REFERENCES users(id),
-            FOREIGN KEY(status) REFERENCES pocket_statuses(name),
             FOREIGN KEY(status_id) REFERENCES statuses(id)
         );
 
@@ -275,8 +284,7 @@ def init_db() -> None:
             name TEXT NOT NULL,
             project_code TEXT,
             pocket_id INTEGER NOT NULL,
-            status TEXT NOT NULL,
-            status_id INTEGER,
+            status_id INTEGER NOT NULL,
             date_start TEXT NOT NULL,
             date_end TEXT,
             curator_business_user_id INTEGER NOT NULL,
@@ -284,7 +292,6 @@ def init_db() -> None:
             FOREIGN KEY(pocket_id) REFERENCES pockets(id),
             FOREIGN KEY(curator_business_user_id) REFERENCES users(id),
             FOREIGN KEY(curator_it_user_id) REFERENCES users(id),
-            FOREIGN KEY(status) REFERENCES project_statuses(name),
             FOREIGN KEY(status_id) REFERENCES statuses(id)
         );
 
@@ -292,8 +299,7 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             description TEXT NOT NULL,
             project_id INTEGER NOT NULL,
-            status TEXT NOT NULL,
-            status_id INTEGER,
+            status_id INTEGER NOT NULL,
             date_created TEXT NOT NULL,
             date_start_work TEXT,
             date_done TEXT,
@@ -302,7 +308,6 @@ def init_db() -> None:
             code_link TEXT,
             FOREIGN KEY(project_id) REFERENCES projects(id),
             FOREIGN KEY(executor_user_id) REFERENCES users(id),
-            FOREIGN KEY(status) REFERENCES task_statuses(name),
             FOREIGN KEY(status_id) REFERENCES statuses(id)
         );
 
@@ -327,18 +332,6 @@ def init_db() -> None:
             FOREIGN KEY(user_id) REFERENCES users(id)
         );
 
-        CREATE TABLE IF NOT EXISTS pocket_statuses (
-            name TEXT PRIMARY KEY
-        );
-
-        CREATE TABLE IF NOT EXISTS project_statuses (
-            name TEXT PRIMARY KEY
-        );
-
-        CREATE TABLE IF NOT EXISTS task_statuses (
-            name TEXT PRIMARY KEY
-        );
-
         CREATE TABLE IF NOT EXISTS statuses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_type TEXT NOT NULL,
@@ -353,11 +346,11 @@ def init_db() -> None:
         """
     )
 
+    _seed_reference_data(conn)
     _migrate_tasks_executor_nullable(conn)
     _migrate_projects_add_project_code(conn)
-    _seed_reference_data(conn)
     _migrate_statuses_model(conn)
-    _sync_status_columns(conn)
+    _validate_status_consistency(conn)
     _validate_status_model(conn)
     conn.commit()
     conn.close()

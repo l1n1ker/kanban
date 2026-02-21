@@ -62,7 +62,7 @@ class Services:
         )
 
     def _action_type_for_update(self, updates: dict[str, Any]) -> str:
-        if "status" in updates:
+        if "status" in updates or "status_id" in updates:
             return "update_status"
         if any(key.endswith("_user_id") for key in updates.keys()):
             return "assign"
@@ -125,6 +125,11 @@ class Services:
             if sid is None:
                 raise ValueError(f"Unknown status '{normalized['status']}' for entity_type '{entity_type}'")
             normalized["status_id"] = sid
+        return normalized
+
+    def _drop_compat_status_field(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        normalized.pop("status", None)
         return normalized
 
     def _task_status_name(self, item: dict[str, Any]) -> str | None:
@@ -251,6 +256,11 @@ class Services:
     def create_pocket(self, data: dict[str, Any]) -> dict[str, Any]:
         self._check("pockets.create")
         data = self._normalize_status_payload(entity_type="pocket", payload=data)
+        if data.get("status_id") is None:
+            data["status_id"] = self._status_id_by_name(entity_type="pocket", name="Запущен")
+        if data.get("status_id") is None:
+            raise ValueError("Pocket status is required")
+        data = self._drop_compat_status_field(data)
         if self._is_curator():
             owner_user_id = int(data.get("owner_user_id", 0))
             actor_id = int(self.actor_user["id"])
@@ -269,7 +279,7 @@ class Services:
     def list_pockets(self, *, status: str | None = None) -> list[dict[str, Any]]:
         self._check("pockets.list")
         status_id = self._status_id_by_name(entity_type="pocket", name=status) if status else None
-        rows = self.pockets.list(status=status, status_id=status_id)
+        rows = self.pockets.list(status_id=status_id)
         return [self._attach_status_name(entity_type="pocket", item=row) for row in rows]
 
     def get_pocket(self, pocket_id: int) -> dict[str, Any]:
@@ -280,6 +290,7 @@ class Services:
         self._check("pockets.update")
         self._ensure_curator_can_manage_pocket(pocket_id)
         updates = self._normalize_status_payload(entity_type="pocket", payload=updates)
+        updates = self._drop_compat_status_field(updates)
         if self._is_curator() and "owner_user_id" in updates:
             if int(updates.get("owner_user_id") or 0) != int(self.actor_user["id"]):
                 raise AccessDenied("Curator cannot transfer pocket ownership")
@@ -303,6 +314,11 @@ class Services:
     def create_project(self, data: dict[str, Any]) -> dict[str, Any]:
         self._check("projects.create")
         data = self._normalize_status_payload(entity_type="project", payload=data)
+        if data.get("status_id") is None:
+            data["status_id"] = self._status_id_by_name(entity_type="project", name="Активен")
+        if data.get("status_id") is None:
+            raise ValueError("Project status is required")
+        data = self._drop_compat_status_field(data)
         self._ensure_curator_can_manage_pocket(int(data["pocket_id"]))
         result = self.projects.create(actor_user_id=self.actor_user["id"], data=data)
         if result:
@@ -312,7 +328,7 @@ class Services:
     def list_projects(self, *, pocket_id: int | None = None, status: str | None = None) -> list[dict[str, Any]]:
         self._check("projects.list")
         status_id = self._status_id_by_name(entity_type="project", name=status) if status else None
-        rows = self.projects.list(pocket_id=pocket_id, status=status, status_id=status_id)
+        rows = self.projects.list(pocket_id=pocket_id, status_id=status_id)
         return [self._attach_status_name(entity_type="project", item=row) for row in rows]
 
     def get_project(self, project_id: int) -> dict[str, Any]:
@@ -323,6 +339,7 @@ class Services:
         self._check("projects.update")
         self._ensure_curator_can_manage_project(project_id)
         updates = self._normalize_status_payload(entity_type="project", payload=updates)
+        updates = self._drop_compat_status_field(updates)
         if self._is_curator() and "pocket_id" in updates:
             self._ensure_curator_can_manage_pocket(int(updates["pocket_id"]))
         current = self.projects.get(project_id)
@@ -337,13 +354,17 @@ class Services:
         self._check("tasks.create")
         self._ensure_curator_can_manage_project(int(data["project_id"]))
         data = self._normalize_status_payload(entity_type="task", payload=data)
-        data.setdefault("status", "Создана")
+        requested_status = str(data.get("status") or "Создана")
         if data.get("status_id") is None:
-            data["status_id"] = self._status_id_by_name(entity_type="task", name=str(data["status"]))
+            data["status_id"] = self._status_id_by_name(entity_type="task", name=requested_status)
+        data = self._drop_compat_status_field(data)
         data.setdefault("date_created", date.today().isoformat())
         data.setdefault("date_start_work", None)
         data.setdefault("date_done", None)
-        if data.get("status") != "Создана":
+        if data.get("status_id") is None:
+            raise ValueError("Task status is required")
+        current_status = self._status_name_by_id(entity_type="task", status_id=int(data["status_id"]))
+        if current_status != "Создана":
             raise ValueError("New task must start with status 'Создана'")
         result = self.tasks.create(actor_user_id=self.actor_user["id"], data=data)
         if result:
@@ -355,7 +376,6 @@ class Services:
         status_id = self._status_id_by_name(entity_type="task", name=status) if status else None
         rows = self.tasks.list(
             project_id=project_id,
-            status=status,
             status_id=status_id,
             executor_user_id=executor_user_id,
         )
@@ -369,6 +389,7 @@ class Services:
         self._check("tasks.update")
         self._ensure_curator_can_manage_task(task_id)
         updates = self._normalize_status_payload(entity_type="task", payload=updates)
+        updates = self._drop_compat_status_field(updates)
         if self._is_curator() and "project_id" in updates:
             self._ensure_curator_can_manage_project(int(updates["project_id"]))
         current = self.tasks.get(task_id)
@@ -432,8 +453,7 @@ class Services:
         if not current_status:
             raise ValueError("Current task status is not defined")
         self._validate_task_status_update(current_status, "В работе")
-        updates = {"status": "В работе"}
-        updates["status_id"] = self._status_id_by_name(entity_type="task", name="В работе")
+        updates = {"status_id": self._status_id_by_name(entity_type="task", name="В работе")}
         if not current.get("date_start_work"):
             updates["date_start_work"] = date.today().isoformat()
         result = self.tasks.update(actor_user_id=self.actor_user["id"], task_id=task_id, updates=updates)
@@ -458,8 +478,7 @@ class Services:
             "date_end": None,
         }
         self.task_pauses.create(actor_user_id=self.actor_user["id"], data=pause_data)
-        updates = {"status": "Приостановлена"}
-        updates["status_id"] = self._status_id_by_name(entity_type="task", name="Приостановлена")
+        updates = {"status_id": self._status_id_by_name(entity_type="task", name="Приостановлена")}
         result = self.tasks.update(actor_user_id=self.actor_user["id"], task_id=task_id, updates=updates)
         if result:
             self._log(entity_type="task", entity_id=task_id, action_type="pause_start", old=current, new=result, comment=comment)
@@ -484,7 +503,7 @@ class Services:
             pause_id=pause["id"],
             updates={"date_end": date.today().isoformat()},
         )
-        updates = {"status": "В работе", "status_id": self._status_id_by_name(entity_type="task", name="В работе")}
+        updates = {"status_id": self._status_id_by_name(entity_type="task", name="В работе")}
         result = self.tasks.update(actor_user_id=self.actor_user["id"], task_id=task_id, updates=updates)
         if result:
             self._log(entity_type="task", entity_id=task_id, action_type="pause_end", old=current, new=result, comment=comment)
@@ -501,7 +520,6 @@ class Services:
             raise ValueError("Current task status is not defined")
         self._validate_task_status_update(current_status, "Завершена")
         updates = {
-            "status": "Завершена",
             "status_id": self._status_id_by_name(entity_type="task", name="Завершена"),
             "date_done": date.today().isoformat(),
         }
@@ -526,14 +544,13 @@ class Services:
         cur = self.conn.execute(
             """
             UPDATE tasks
-            SET executor_user_id = ?, status = ?, status_id = ?, date_start_work = COALESCE(date_start_work, ?)
+            SET executor_user_id = ?, status_id = ?, date_start_work = COALESCE(date_start_work, ?)
             WHERE id = ? AND executor_user_id IS NULL AND status_id = (
                 SELECT id FROM statuses WHERE entity_type = 'task' AND name = 'Создана' LIMIT 1
             )
             """,
             (
                 int(self.actor_user["id"]),
-                "В работе",
                 in_progress_id,
                 today,
                 task_id,

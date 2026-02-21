@@ -12,6 +12,12 @@ from backend.rbac import AccessDenied
 from backend.services import Services
 
 
+def _is_user_active(row: sqlite3.Row) -> bool:
+    if row["status_id"] is not None:
+        return int(row["status_is_active"] or 0) == 1
+    return int(row["is_active"]) == 1
+
+
 def get_actor_user(
     x_user_id: int | None = Header(default=None, alias="X-User-Id"),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
@@ -21,12 +27,18 @@ def get_actor_user(
         conn = get_connection()
         try:
             row = conn.execute(
-                "SELECT id, login, full_name, role, is_active FROM users WHERE login = ?",
+                """
+                SELECT u.id, u.login, u.full_name, u.role, u.is_active, u.status_id,
+                       CASE WHEN s.name = 'Активен' THEN 1 ELSE 0 END AS status_is_active
+                FROM users u
+                LEFT JOIN statuses s ON s.id = u.status_id AND s.entity_type = 'user'
+                WHERE u.login = ?
+                """,
                 (x_user_login,),
             ).fetchone()
         finally:
             conn.close()
-        if not row or int(row["is_active"]) != 1:
+        if not row or not _is_user_active(row):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Login '{x_user_login}' is not mapped to an active user",
@@ -44,12 +56,18 @@ def get_actor_user(
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT id, login, full_name, role, is_active FROM users WHERE id = ?",
+            """
+            SELECT u.id, u.login, u.full_name, u.role, u.is_active, u.status_id,
+                   CASE WHEN s.name = 'Активен' THEN 1 ELSE 0 END AS status_is_active
+            FROM users u
+            LEFT JOIN statuses s ON s.id = u.status_id AND s.entity_type = 'user'
+            WHERE u.id = ?
+            """,
             (x_user_id,),
         ).fetchone()
     finally:
         conn.close()
-    if not row or int(row["is_active"]) != 1:
+    if not row or not _is_user_active(row):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"User id '{x_user_id}' is not active",
