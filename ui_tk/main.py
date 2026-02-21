@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import getpass
+from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime
 from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, BooleanVar, Canvas, PhotoImage, StringVar, Tk, Toplevel
@@ -117,6 +118,8 @@ KANBAN_ACTION_ICONS = {
     "resume": "resume",
     "complete": "complete",
 }
+TIMELINE_ROW_HEIGHT = 30
+TIMELINE_DEFAULT_SPLIT_RATIO = 0.38
 
 
 def _app_dir() -> str:
@@ -182,6 +185,7 @@ class FilterContext:
     preset_name: str = DEFAULT_PRESET_NAME
     dashboard_visible: bool = False
     kanban_visible: bool = False
+    timeline_visible: bool = False
     summary_short: str = "Фильтр: пуст"
     summary_full: str = "Фильтр пуст"
 
@@ -226,6 +230,18 @@ class KanbanTkApp(Tk):
         self._kanban_filter_summary_full_text = "Фильтр пуст"
         self._kanban_filter_tooltip: Toplevel | None = None
         self._widget_tooltip: Toplevel | None = None
+        self.timeline_slice_start_var = StringVar(value="")
+        self.timeline_slice_end_var = StringVar(value="")
+        self.timeline_filter_summary_var = StringVar(value="Фильтр: пуст")
+        self.timeline_rows_tree: ttk.Treeview | None = None
+        self.timeline_canvas: Canvas | None = None
+        self.timeline_pauses_by_task_id: dict[int, list[dict[str, Any]]] = {}
+        self.timeline_filter_visible = False
+        self.timeline_filter_rows: list[FilterRow] = []
+        self.timeline_full_text_by_task_id: dict[int, str] = {}
+        self._timeline_hover_task_id: int | None = None
+        self.timeline_split_ratio = self._load_timeline_split_ratio()
+        self._syncing_timeline_scroll = False
         self.global_filter_context = FilterContext(
             rows=[FilterRowState(logic="AND", field="status", op="!=", value="Завершена")]
         )
@@ -259,6 +275,7 @@ class KanbanTkApp(Tk):
             visible=self.filter_visible,
         )
         self._apply_global_filter_context_to_zone("kanban")
+        self._apply_global_filter_context_to_zone("timeline")
         self._show_zone("dashboard")
         self._load_dashboard_data()
 
@@ -307,16 +324,17 @@ class KanbanTkApp(Tk):
         self._build_kanban(kanban)
         self.zones["kanban"] = kanban
 
-        for name, caption in (("timeline", "Timeline (в разработке)"), ("analytics", "Аналитика (в разработке)")):
-            frame = ttk.Frame(container)
-            ttk.Label(frame, text=caption).pack(pady=30)
-            summary_var = StringVar(value=self.global_filter_context.summary_short)
-            if name == "timeline":
-                self.timeline_filter_summary_var = summary_var
-            else:
-                self.analytics_filter_summary_var = summary_var
-            ttk.Label(frame, textvariable=summary_var, style="Surface.TLabel").pack(side=BOTTOM, anchor="e", padx=12, pady=12)
-            self.zones[name] = frame
+        timeline = ttk.Frame(container)
+        self._build_timeline(timeline)
+        self.zones["timeline"] = timeline
+
+        analytics = ttk.Frame(container)
+        ttk.Label(analytics, text="Analytics (in progress)").pack(pady=30)
+        self.analytics_filter_summary_var = StringVar(value=self.global_filter_context.summary_short)
+        ttk.Label(analytics, textvariable=self.analytics_filter_summary_var, style="Surface.TLabel").pack(
+            side=BOTTOM, anchor="e", padx=12, pady=12
+        )
+        self.zones["analytics"] = analytics
 
     def _build_dashboard(self, parent: ttk.Frame) -> None:
         toolbar = ttk.Frame(parent, padding=(8, 8))
@@ -551,6 +569,598 @@ class KanbanTkApp(Tk):
         self._mk_button(controls, "+ Условие", self._add_kanban_filter_row).pack(side=LEFT)
         self._mk_button(controls, "Применить", self._apply_kanban_filters).pack(side=LEFT, padx=4)
 
+    def _timeline_default_month_bounds(self) -> tuple[date, date]:
+        today = date.today()
+        first = date(today.year, today.month, 1)
+        last = date(today.year, today.month, monthrange(today.year, today.month)[1])
+        return first, last
+
+
+    def _truncate_timeline_text(self, text: Any, max_len: int = 40) -> str:
+        value = str(text or "")
+        if len(value) <= max_len:
+            return value
+        return value[: max_len - 3] + "..."
+
+    def _on_timeline_tree_motion_show_tooltip(self, event: object) -> None:
+        if not self.timeline_rows_tree:
+            return
+        x = int(getattr(event, "x", 0))
+        y = int(getattr(event, "y", 0))
+        row_id = self.timeline_rows_tree.identify_row(y)
+        column = self.timeline_rows_tree.identify_column(x)
+        if not row_id or column != "#2":
+            self._timeline_hover_task_id = None
+            self._hide_widget_tooltip()
+            return
+        try:
+            task_id = int(row_id)
+        except Exception:
+            self._timeline_hover_task_id = None
+            self._hide_widget_tooltip()
+            return
+        full_text = self.timeline_full_text_by_task_id.get(task_id, "")
+        short_text = self._truncate_timeline_text(full_text)
+        if not full_text or full_text == short_text:
+            self._timeline_hover_task_id = None
+            self._hide_widget_tooltip()
+            return
+        if self._timeline_hover_task_id == task_id:
+            return
+        self._timeline_hover_task_id = task_id
+        self._show_widget_tooltip(event, full_text)
+
+    def _load_timeline_split_ratio(self) -> float:
+        path = _ui_config_file()
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                ratio = float(data.get("timeline_split_ratio", TIMELINE_DEFAULT_SPLIT_RATIO))
+                return min(0.8, max(0.2, ratio))
+            except Exception:
+                pass
+        return TIMELINE_DEFAULT_SPLIT_RATIO
+
+    def _save_timeline_split_ratio(self, ratio: float) -> None:
+        path = _ui_config_file()
+        data: dict[str, Any] = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception:
+                data = {}
+        data["timeline_split_ratio"] = min(0.8, max(0.2, ratio))
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _restore_timeline_pane_ratio(self) -> None:
+        if "timeline_paned" not in self.__dict__:
+            return
+        if not self.timeline_paned or not self.timeline_paned.winfo_exists():
+            return
+        width = int(self.timeline_paned.winfo_width())
+        if width <= 8:
+            return
+        desired = int(width * self.timeline_split_ratio)
+        desired = min(max(120, desired), width - 120)
+        try:
+            self.timeline_paned.sashpos(0, desired)
+        except Exception:
+            return
+
+    def _on_timeline_pane_released(self, _event: object) -> None:
+        if "timeline_paned" not in self.__dict__:
+            return
+        if not self.timeline_paned or not self.timeline_paned.winfo_exists():
+            return
+        width = int(self.timeline_paned.winfo_width())
+        if width <= 8:
+            return
+        try:
+            sash = int(self.timeline_paned.sashpos(0))
+        except Exception:
+            return
+        ratio = sash / float(width)
+        self.timeline_split_ratio = min(0.8, max(0.2, ratio))
+        self._save_timeline_split_ratio(self.timeline_split_ratio)
+
+    def _on_timeline_paned_configure(self, _event: object) -> None:
+        self.after_idle(self._restore_timeline_pane_ratio)
+
+    def _build_timeline(self, parent: ttk.Frame) -> None:
+        toolbar = ttk.Frame(parent, padding=(8, 8))
+        toolbar.pack(fill="x")
+        self._mk_button(toolbar, "Обновить", self._load_dashboard_data).pack(side=LEFT)
+
+        period_bar = ttk.Frame(parent, padding=(8, 0, 8, 8))
+        period_bar.pack(fill="x")
+        ttk.Label(period_bar, text="Начало:").pack(side=LEFT)
+        ttk.Entry(period_bar, textvariable=self.timeline_slice_start_var, width=12).pack(side=LEFT, padx=(4, 8))
+        ttk.Label(period_bar, text="Окончание:").pack(side=LEFT)
+        ttk.Entry(period_bar, textvariable=self.timeline_slice_end_var, width=12).pack(side=LEFT, padx=(4, 8))
+        self._mk_button(period_bar, "Применить период", self._apply_timeline_period).pack(side=LEFT, padx=2)
+        self._mk_button(period_bar, "Сброс периода", self._reset_timeline_period).pack(side=LEFT, padx=6)
+
+        self.timeline_filter_panel = ttk.Frame(parent, padding=(8, 8))
+        self._build_timeline_filter_panel(self.timeline_filter_panel)
+
+        content = ttk.Frame(parent, padding=(8, 8))
+        content.pack(fill=BOTH, expand=True)
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_rowconfigure(0, weight=1)
+
+        self.timeline_paned = ttk.Panedwindow(content, orient="horizontal")
+        self.timeline_paned.grid(row=0, column=0, sticky="nsew")
+
+        left = ttk.Frame(self.timeline_paned)
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(0, weight=1)
+
+        right = ttk.Frame(self.timeline_paned)
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(0, weight=1)
+
+        self.timeline_paned.add(left, weight=3)
+        self.timeline_paned.add(right, weight=5)
+        self.timeline_paned.bind("<ButtonRelease-1>", self._on_timeline_pane_released)
+        self.timeline_paned.bind("<Configure>", self._on_timeline_paned_configure)
+
+        cols = ("id", "description", "status", "executor_full_name", "date_start_work", "date_done")
+        self.timeline_rows_tree = ttk.Treeview(left, columns=cols, show="headings", style="Timeline.Treeview")
+        self.timeline_rows_tree.heading("id", text="ID")
+        self.timeline_rows_tree.heading("description", text="Задача")
+        self.timeline_rows_tree.heading("status", text="Статус")
+        self.timeline_rows_tree.heading("executor_full_name", text="Исполнитель")
+        self.timeline_rows_tree.heading("date_start_work", text="Старт")
+        self.timeline_rows_tree.heading("date_done", text="Завершена")
+        self.timeline_rows_tree.column("id", width=70, anchor="center")
+        self.timeline_rows_tree.column("description", width=360, anchor="w")
+        self.timeline_rows_tree.column("status", width=140, anchor="w")
+        self.timeline_rows_tree.column("executor_full_name", width=180, anchor="w")
+        self.timeline_rows_tree.column("date_start_work", width=110, anchor="center")
+        self.timeline_rows_tree.column("date_done", width=110, anchor="center")
+        self.timeline_rows_tree.grid(row=0, column=0, sticky="nsew")
+        self.timeline_rows_tree.bind("<Double-1>", self._on_timeline_double_click)
+        self.timeline_rows_tree.bind("<Motion>", self._on_timeline_tree_motion_show_tooltip)
+        self.timeline_rows_tree.bind("<Leave>", self._hide_widget_tooltip)
+        self.timeline_rows_tree.bind("<ButtonPress>", self._hide_widget_tooltip)
+
+        self.timeline_canvas = Canvas(right, highlightthickness=0, bd=0, bg=self._theme_color("surface_panel", "#FFFFFF"))
+        self.timeline_vscroll = ttk.Scrollbar(right, orient=VERTICAL, command=self._timeline_canvas_yview)
+        self.timeline_hscroll = ttk.Scrollbar(right, orient="horizontal", command=self.timeline_canvas.xview)
+        self.timeline_tree_scroll = ttk.Scrollbar(left, orient=VERTICAL, command=self._timeline_tree_yview)
+        self.timeline_rows_tree.configure(yscrollcommand=self._timeline_tree_yscroll)
+        self.timeline_canvas.configure(yscrollcommand=self._timeline_canvas_yscroll, xscrollcommand=self.timeline_hscroll.set)
+        self.timeline_canvas.grid(row=0, column=0, sticky="nsew")
+        self.timeline_tree_scroll.grid(row=0, column=1, sticky="ns")
+        self.timeline_vscroll.grid(row=0, column=1, sticky="ns")
+        self.timeline_hscroll.grid(row=1, column=0, sticky="ew")
+
+        self.timeline_bottom_controls = ttk.Frame(parent, padding=(8, 8))
+        self.timeline_bottom_controls.pack(fill="x")
+        self._mk_button(self.timeline_bottom_controls, "Фильтр", self._toggle_timeline_filter_panel).pack(side=LEFT, padx=2)
+        self.timeline_filter_label = ttk.Label(self.timeline_bottom_controls, textvariable=self.timeline_filter_summary_var, style="Surface.TLabel", cursor="hand2")
+        self.timeline_filter_label.pack(side=LEFT, padx=12)
+        self.timeline_filter_label.bind("<Enter>", self._show_filter_tooltip)
+        self.timeline_filter_label.bind("<Leave>", self._hide_filter_tooltip)
+        self.timeline_session_label = ttk.Label(self.timeline_bottom_controls, textvariable=self.session_var, cursor="hand2", style="Session.TLabel", padding=(8, 2))
+        self.timeline_session_label.pack(side=RIGHT, padx=6)
+        self.timeline_session_label.bind("<Button-1>", self._on_session_click)
+
+        self._reset_timeline_period(silent=True)
+        self._apply_timeline_preset(DEFAULT_PRESET_NAME)
+        self._refresh_timeline_filter_indicator()
+        self.after_idle(self._restore_timeline_pane_ratio)
+
+    def _build_timeline_filter_panel(self, parent: ttk.Frame) -> None:
+        presets_bar = ttk.Frame(parent)
+        presets_bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(presets_bar, text="Пресет:").pack(side=LEFT)
+        self.timeline_preset_var = StringVar(value=DEFAULT_PRESET_NAME)
+        self.timeline_preset_combo = ttk.Combobox(
+            presets_bar,
+            textvariable=self.timeline_preset_var,
+            values=sorted(self.presets.keys()),
+            state="readonly",
+            width=28,
+        )
+        self.timeline_preset_combo.pack(side=LEFT, padx=6)
+        self._mk_button(presets_bar, "Применить", self._apply_selected_timeline_preset).pack(side=LEFT, padx=2)
+        self._mk_button(presets_bar, "Сохранить текущий", self._save_current_timeline_preset).pack(side=LEFT, padx=2)
+        self._mk_button(presets_bar, "Переименовать", self._rename_timeline_preset).pack(side=LEFT, padx=2)
+        self._mk_button(presets_bar, "Удалить", self._delete_timeline_preset).pack(side=LEFT, padx=2)
+
+        self.timeline_rows_holder = ttk.Frame(parent)
+        self.timeline_rows_holder.pack(fill="x")
+        controls = ttk.Frame(parent)
+        controls.pack(fill="x", pady=(6, 0))
+        self._mk_button(controls, "+ Условие", self._add_timeline_filter_row).pack(side=LEFT)
+        self._mk_button(controls, "Применить", self._apply_timeline_filters).pack(side=LEFT, padx=4)
+
+    def _toggle_timeline_filter_panel(self) -> None:
+        self.timeline_filter_visible = not self.timeline_filter_visible
+        if self.timeline_filter_visible:
+            self.timeline_filter_panel.pack(fill="x", before=self.timeline_bottom_controls)
+        else:
+            self.timeline_filter_panel.pack_forget()
+        self._sync_global_filter_context_from_rows(
+            self.timeline_filter_rows,
+            zone="timeline",
+            preset_name=self.timeline_preset_var.get() if "timeline_preset_var" in self.__dict__ else DEFAULT_PRESET_NAME,
+            visible=self.timeline_filter_visible,
+        )
+
+    def _add_timeline_filter_row(self, field: str = "status", op: str = "==", value: str = "", logic: str = "AND") -> None:
+        row = ttk.Frame(self.timeline_rows_holder)
+        row.pack(fill="x", pady=2)
+        logic_var = StringVar(value=logic)
+        field_var = StringVar(value=field)
+        op_var = StringVar(value=op)
+        value_var = StringVar(value=value)
+
+        if self.timeline_filter_rows:
+            ttk.Combobox(row, textvariable=logic_var, values=["AND", "OR"], width=6, state="readonly").pack(side=LEFT, padx=2)
+        else:
+            ttk.Label(row, text="").pack(side=LEFT, padx=2)
+
+        ttk.Combobox(
+            row,
+            textvariable=field_var,
+            values=[
+                "id", "description", "status", "date_created", "date_start_work", "date_done",
+                "executor_full_name", "executor_user_id", "customer", "code_link", "project_id",
+                "project_name", "pocket_id", "pocket_name",
+            ],
+            width=18,
+            state="readonly",
+        ).pack(side=LEFT, padx=2)
+        ttk.Combobox(row, textvariable=op_var, values=["==", "!=", "in", "contains", "between", ">", "<", ">=", "<="], width=10, state="readonly").pack(side=LEFT, padx=2)
+        ttk.Entry(row, textvariable=value_var, width=36).pack(side=LEFT, padx=2)
+        self._mk_button(row, "x", lambda r=row: self._remove_timeline_filter_row(r), width=3).pack(side=LEFT, padx=2)
+
+        self.timeline_filter_rows.append(FilterRow(row, logic_var, field_var, op_var, value_var))
+        self._refresh_timeline_filter_indicator()
+
+    def _remove_timeline_filter_row(self, row_frame: ttk.Frame) -> None:
+        for idx, item in enumerate(self.timeline_filter_rows):
+            if item.frame == row_frame:
+                item.frame.destroy()
+                self.timeline_filter_rows.pop(idx)
+                break
+        self._apply_timeline_filters()
+
+    def _apply_timeline_filters(self) -> None:
+        self._sync_global_filter_context_from_rows(
+            self.timeline_filter_rows,
+            zone="timeline",
+            preset_name=self.timeline_preset_var.get() if "timeline_preset_var" in self.__dict__ else DEFAULT_PRESET_NAME,
+            visible=self.timeline_filter_visible,
+        )
+        self._apply_global_filter_context_to_zone("dashboard")
+        self._apply_global_filter_context_to_zone("kanban")
+        self._apply_global_filter_context_to_zone("timeline")
+        if hasattr(self, "preset_var"):
+            self.preset_var.set(self.global_filter_context.preset_name if self.global_filter_context.preset_name in self.presets else DEFAULT_PRESET_NAME)
+        if hasattr(self, "kanban_preset_var"):
+            self.kanban_preset_var.set(self.global_filter_context.preset_name if self.global_filter_context.preset_name in self.kanban_presets else DEFAULT_PRESET_NAME)
+        self._refresh_dashboard_top_table_from_filter_context()
+        self._refresh_dashboard_bottom_table_from_selection_and_filter()
+        self._refresh_kanban_board()
+        self._refresh_timeline()
+
+    def _apply_selected_timeline_preset(self) -> None:
+        self._apply_timeline_preset(self.timeline_preset_var.get())
+        self._apply_timeline_filters()
+
+    def _apply_timeline_preset(self, name: str) -> None:
+        preset = self.presets.get(name)
+        if not preset:
+            return
+        for row in self.timeline_filter_rows:
+            row.frame.destroy()
+        self.timeline_filter_rows.clear()
+        for cond in preset.get("filters", []):
+            self._add_timeline_filter_row(
+                field=cond.get("field", "status"),
+                op=cond.get("op", "=="),
+                value=cond.get("value", ""),
+                logic=cond.get("logic", "AND"),
+            )
+        self.timeline_filter_visible = bool(preset.get("filter_visible", False))
+        if self.timeline_filter_visible:
+            self.timeline_filter_panel.pack(fill="x", before=self.timeline_bottom_controls)
+        else:
+            self.timeline_filter_panel.pack_forget()
+        self._sync_global_filter_context_from_rows(self.timeline_filter_rows, zone="timeline", preset_name=name, visible=self.timeline_filter_visible)
+
+    def _save_current_timeline_preset(self) -> None:
+        name = simpledialog.askstring("Сохранить пресет", "Имя пресета:", parent=self)
+        if not name:
+            return
+        self.presets[name] = {
+            "filter_visible": self.timeline_filter_visible,
+            "filters": self._serialize_filter_rows(self.timeline_filter_rows),
+        }
+        self._save_presets(self.presets)
+        self._refresh_preset_combo()
+        if hasattr(self, "timeline_preset_combo"):
+            self.timeline_preset_combo["values"] = sorted(self.presets.keys())
+        self.timeline_preset_var.set(name)
+
+    def _rename_timeline_preset(self) -> None:
+        old = self.timeline_preset_var.get()
+        if old not in self.presets:
+            return
+        new = simpledialog.askstring("Переименовать пресет", "Новое имя:", initialvalue=old, parent=self)
+        if not new or new == old:
+            return
+        self.presets[new] = self.presets.pop(old)
+        self._save_presets(self.presets)
+        self._refresh_preset_combo()
+        if hasattr(self, "timeline_preset_combo"):
+            self.timeline_preset_combo["values"] = sorted(self.presets.keys())
+        self.timeline_preset_var.set(new)
+
+    def _delete_timeline_preset(self) -> None:
+        name = self.timeline_preset_var.get()
+        if name == DEFAULT_PRESET_NAME:
+            messagebox.showwarning("Ограничение", "Пресет по умолчанию удалить нельзя.")
+            return
+        if name in self.presets:
+            del self.presets[name]
+            self._save_presets(self.presets)
+            self._refresh_preset_combo()
+            if hasattr(self, "timeline_preset_combo"):
+                self.timeline_preset_combo["values"] = sorted(self.presets.keys())
+            self.timeline_preset_var.set(DEFAULT_PRESET_NAME)
+            self._apply_timeline_preset(DEFAULT_PRESET_NAME)
+
+    def _refresh_timeline_filter_indicator(self) -> None:
+        self._refresh_global_filter_indicators()
+
+    def _timeline_tree_yview(self, *args: Any) -> None:
+        if not self.timeline_rows_tree or not self.timeline_canvas:
+            return
+        self.timeline_rows_tree.yview(*args)
+        if not self._syncing_timeline_scroll:
+            self._syncing_timeline_scroll = True
+            try:
+                first, _ = self.timeline_rows_tree.yview()
+                self.timeline_canvas.yview_moveto(first)
+            finally:
+                self._syncing_timeline_scroll = False
+
+    def _timeline_canvas_yview(self, *args: Any) -> None:
+        if not self.timeline_rows_tree or not self.timeline_canvas:
+            return
+        self.timeline_canvas.yview(*args)
+        if not self._syncing_timeline_scroll:
+            self._syncing_timeline_scroll = True
+            try:
+                first, _ = self.timeline_canvas.yview()
+                self.timeline_rows_tree.yview_moveto(first)
+            finally:
+                self._syncing_timeline_scroll = False
+
+    def _timeline_tree_yscroll(self, first: str, last: str) -> None:
+        if hasattr(self, "timeline_tree_scroll"):
+            self.timeline_tree_scroll.set(first, last)
+        if not self._syncing_timeline_scroll and self.timeline_canvas:
+            self._syncing_timeline_scroll = True
+            try:
+                self.timeline_canvas.yview_moveto(float(first))
+            finally:
+                self._syncing_timeline_scroll = False
+
+    def _timeline_canvas_yscroll(self, first: str, last: str) -> None:
+        if hasattr(self, "timeline_vscroll"):
+            self.timeline_vscroll.set(first, last)
+        if not self._syncing_timeline_scroll and self.timeline_rows_tree:
+            self._syncing_timeline_scroll = True
+            try:
+                self.timeline_rows_tree.yview_moveto(float(first))
+            finally:
+                self._syncing_timeline_scroll = False
+
+    def _parse_iso_date(self, value: Any) -> date | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, date):
+            return value
+        try:
+            return date.fromisoformat(str(value))
+        except Exception:
+            return None
+
+    def _task_timeline_bounds(self, task: dict[str, Any]) -> tuple[date, date]:
+        start = self._parse_iso_date(task.get("date_start_work")) or self._parse_iso_date(task.get("date_created")) or date.today()
+        end = self._parse_iso_date(task.get("date_done")) or date.today()
+        if end < start:
+            end = start
+        return start, end
+
+    def _timeline_intersects_slice(self, start: date, end: date, slice_start: date | None, slice_end: date | None) -> bool:
+        left = slice_start or date.min
+        right = slice_end or date.max
+        return not (end < left or start > right)
+
+    def _timeline_slice_bounds(self, *, show_errors: bool = False) -> tuple[date | None, date | None] | None:
+        raw_start = self.timeline_slice_start_var.get().strip()
+        raw_end = self.timeline_slice_end_var.get().strip()
+        slice_start = self._parse_iso_date(raw_start)
+        slice_end = self._parse_iso_date(raw_end)
+        if raw_start and slice_start is None:
+            if show_errors:
+                messagebox.showerror("Timeline", "Неверная дата начала. Формат: YYYY-MM-DD")
+            return None
+        if raw_end and slice_end is None:
+            if show_errors:
+                messagebox.showerror("Timeline", "Неверная дата окончания. Формат: YYYY-MM-DD")
+            return None
+        if slice_start and slice_end and slice_start > slice_end:
+            if show_errors:
+                messagebox.showerror("Timeline", "Дата начала не может быть позже даты окончания.")
+            return None
+        return slice_start, slice_end
+
+    def _apply_timeline_slice(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        bounds = self._timeline_slice_bounds(show_errors=False)
+        if bounds is None:
+            return rows
+        slice_start, slice_end = bounds
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            start, end = self._task_timeline_bounds(row)
+            if self._timeline_intersects_slice(start, end, slice_start, slice_end):
+                result.append(row)
+        return result
+
+    def _apply_timeline_period(self) -> None:
+        if self._timeline_slice_bounds(show_errors=True) is None:
+            return
+        self._refresh_timeline()
+
+    def _reset_timeline_period(self, *, silent: bool = False) -> None:
+        start, end = self._timeline_default_month_bounds()
+        self.timeline_slice_start_var.set(start.isoformat())
+        self.timeline_slice_end_var.set(end.isoformat())
+        if not silent:
+            self._refresh_timeline()
+
+    def _draw_timeline_axis(self, min_date: date, max_date: date, left_pad: int, top_pad: int, row_h: int, row_count: int) -> int:
+        if not self.timeline_canvas:
+            return 16
+        ppd = 16
+        total_days = max(1, (max_date - min_date).days + 1)
+        height = top_pad + row_count * row_h + 20
+        today = date.today()
+        for d in range(total_days + 1):
+            dt = date.fromordinal(min_date.toordinal() + d)
+            x = left_pad + d * ppd
+            if dt == today:
+                color = self._theme_color("info", "#3D6475")
+                width = 2
+            elif dt.weekday() == 0:
+                color = self._theme_color("border", "#D8DDD8")
+                width = 2
+            else:
+                color = self._theme_color("border", "#D8DDD8")
+                width = 1
+            self.timeline_canvas.create_line(x, top_pad - 14, x, height, fill=color, width=width)
+            if d < total_days and (dt.weekday() == 0 or d == 0):
+                self.timeline_canvas.create_text(
+                    x + 2,
+                    8,
+                    anchor="nw",
+                    text=dt.strftime("%d.%m"),
+                    fill=self._theme_color("text_muted", "#5F6B6D"),
+                )
+        return ppd
+
+    def _open_timeline_task_by_id(self, task_id: int) -> None:
+        task = next((t for t in self.tasks_all if int(t.get("id", 0)) == int(task_id)), None)
+        if task:
+            self._open_task_form(mode="edit", task=task)
+
+    def _on_timeline_double_click(self, event: object) -> None:
+        if not self.timeline_rows_tree:
+            return
+        row_id = self.timeline_rows_tree.identify_row(getattr(event, "y", 0))
+        if row_id:
+            self._open_timeline_task_by_id(int(row_id))
+
+    def _draw_timeline_row_grid(self, *, left_pad: int, top_pad: int, row_h: int, row_count: int, width: int) -> None:
+        if not self.timeline_canvas:
+            return
+        line_color = self._theme_color("border", "#D8DDD8")
+        for idx in range(row_count + 1):
+            y = top_pad + idx * row_h
+            self.timeline_canvas.create_line(left_pad, y, width, y, fill=line_color)
+
+    def _draw_timeline_row(self, idx: int, row: dict[str, Any], *, min_date: date, ppd: int, left_pad: int, top_pad: int, row_h: int) -> None:
+        if not self.timeline_canvas:
+            return
+        task_id = int(row.get("id", 0))
+        start, end = self._task_timeline_bounds(row)
+        y = top_pad + idx * row_h
+        x0 = left_pad + max(0, (start - min_date).days) * ppd
+        x1 = left_pad + (max(0, (end - min_date).days) + 1) * ppd
+        tag = f"timeline_task_{task_id}"
+        self.timeline_canvas.create_rectangle(x0, y + 6, x1, y + row_h - 8, fill=self._theme_color("accent", "#4F6B5A"), outline="", tags=(tag,))
+        for pause in self.timeline_pauses_by_task_id.get(task_id, []):
+            p_start = self._parse_iso_date(pause.get("date_start"))
+            p_end = self._parse_iso_date(pause.get("date_end")) or date.today()
+            if not p_start:
+                continue
+            if p_end < p_start:
+                p_end = p_start
+            px0 = left_pad + max(0, (p_start - min_date).days) * ppd
+            px1 = left_pad + (max(0, (p_end - min_date).days) + 1) * ppd
+            self.timeline_canvas.create_rectangle(px0, y + 12, px1, y + row_h - 14, fill=self._theme_color("warning", "#B07A2F"), outline="", tags=(tag,))
+        self.timeline_canvas.tag_bind(tag, "<Double-1>", lambda _e, tid=task_id: self._open_timeline_task_by_id(tid))
+
+    def _refresh_timeline(self) -> None:
+        if "timeline_rows_tree" not in self.__dict__ or "timeline_canvas" not in self.__dict__:
+            return
+        if not self.timeline_rows_tree or not self.timeline_canvas:
+            return
+        rows_global = self._build_filtered_task_rows()
+        rows = self._apply_timeline_slice(rows_global)
+
+        self.timeline_full_text_by_task_id = {}
+        self._timeline_hover_task_id = None
+        self._hide_widget_tooltip()
+
+        self.timeline_rows_tree.delete(*self.timeline_rows_tree.get_children())
+        for row in rows:
+            task_id = int(row.get("id", 0) or 0)
+            full_description = str(row.get("description", "") or "")
+            self.timeline_full_text_by_task_id[task_id] = full_description
+            values = (
+                row.get("id", ""),
+                self._truncate_timeline_text(full_description),
+                row.get("status", ""),
+                row.get("executor_full_name", ""),
+                row.get("date_start_work", "") or row.get("date_created", ""),
+                row.get("date_done", "") or "-",
+            )
+            self.timeline_rows_tree.insert("", END, iid=str(row.get("id")), values=values)
+
+        self.timeline_canvas.delete("all")
+        if not rows:
+            self.timeline_canvas.create_text(20, 20, anchor="nw", text="Нет данных для Timeline", fill=self._theme_color("text_muted", "#5F6B6D"))
+            self.timeline_canvas.configure(scrollregion=(0, 0, 600, 120))
+            return
+
+        bounds = [self._task_timeline_bounds(r) for r in rows]
+        min_date = min(s for s, _ in bounds)
+        max_date = max(e for _, e in bounds)
+        slice_bounds = self._timeline_slice_bounds(show_errors=False)
+        if slice_bounds is not None:
+            slice_start, slice_end = slice_bounds
+            if slice_start:
+                min_date = min(min_date, slice_start)
+            if slice_end:
+                max_date = max(max_date, slice_end)
+
+        row_h = TIMELINE_ROW_HEIGHT
+        left_pad = 20
+        top_pad = 30
+        ppd = self._draw_timeline_axis(min_date, max_date, left_pad, top_pad, row_h, len(rows))
+
+        total_days = max(1, (max_date - min_date).days + 1)
+        width = 40 + total_days * ppd
+        self._draw_timeline_row_grid(left_pad=left_pad, top_pad=top_pad, row_h=row_h, row_count=len(rows), width=width)
+        for idx, row in enumerate(rows):
+            self._draw_timeline_row(idx, row, min_date=min_date, ppd=ppd, left_pad=left_pad, top_pad=top_pad, row_h=row_h)
+
+        height = top_pad + len(rows) * row_h + 20
+        self.timeline_canvas.configure(scrollregion=(0, 0, width, height))
+
     def _show_zone(self, name: str) -> None:
         self._hide_widget_tooltip()
         self.current_zone = name
@@ -563,7 +1173,11 @@ class KanbanTkApp(Tk):
         elif name == "kanban":
             self._apply_global_filter_context_to_zone("kanban")
             self._refresh_kanban_board()
-        elif name in {"timeline", "analytics"}:
+        elif name == "timeline":
+            self._apply_global_filter_context_to_zone("timeline")
+            self._refresh_timeline()
+            self._refresh_global_filter_indicators()
+        elif name == "analytics":
             self._refresh_global_filter_indicators()
 
     def _toggle_filter_panel(self) -> None:
@@ -634,6 +1248,8 @@ class KanbanTkApp(Tk):
                 self.global_filter_context.dashboard_visible = visible
             elif zone == "kanban":
                 self.global_filter_context.kanban_visible = visible
+            elif zone == "timeline":
+                self.global_filter_context.timeline_visible = visible
         self._refresh_global_filter_indicators()
 
     def _build_effective_filter_rows(self) -> list[FilterRowState]:
@@ -711,6 +1327,25 @@ class KanbanTkApp(Tk):
         else:
             self.kanban_filter_panel.pack_forget()
 
+    def _replace_timeline_filter_rows_from_context(self) -> None:
+        if not hasattr(self, "timeline_rows_holder"):
+            return
+        for row in self.timeline_filter_rows:
+            row.frame.destroy()
+        self.timeline_filter_rows.clear()
+        for cond in self.global_filter_context.rows:
+            self._add_timeline_filter_row(
+                field=cond.field or "status",
+                op=cond.op or "==",
+                value=cond.value,
+                logic=cond.logic or "AND",
+            )
+        self.timeline_filter_visible = bool(self.global_filter_context.timeline_visible)
+        if self.timeline_filter_visible:
+            self.timeline_filter_panel.pack(fill="x", before=self.timeline_bottom_controls)
+        else:
+            self.timeline_filter_panel.pack_forget()
+
     def _apply_global_filter_context_to_zone(self, zone_name: str) -> None:
         if zone_name == "dashboard":
             self._replace_dashboard_filter_rows_from_context()
@@ -720,6 +1355,10 @@ class KanbanTkApp(Tk):
             self._replace_kanban_filter_rows_from_context()
             if hasattr(self, "kanban_preset_var"):
                 self.kanban_preset_var.set(self.global_filter_context.preset_name)
+        elif zone_name == "timeline":
+            self._replace_timeline_filter_rows_from_context()
+            if "timeline_preset_var" in self.__dict__:
+                self.timeline_preset_var.set(self.global_filter_context.preset_name)
 
     def _apply_global_filter_to_zone(self, zone_name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         del zone_name  # reserved for timeline/analytics specific behavior
@@ -775,6 +1414,13 @@ class KanbanTkApp(Tk):
         if hasattr(self, "analytics_filter_summary_var"):
             self.analytics_filter_summary_var.set(short_text)
 
+    def _group_pauses_by_task_id(self, pauses: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for pause in pauses:
+            task_id = int(pause.get("task_id", 0))
+            grouped.setdefault(task_id, []).append(pause)
+        return grouped
+
     def _load_dashboard_data(self) -> None:
         try:
             if self.session_user is None:
@@ -790,6 +1436,7 @@ class KanbanTkApp(Tk):
             pockets = self.api.list_pockets()
             projects = self.api.list_projects()
             tasks = self.api.list_tasks()
+            pauses = self.api.list_task_pauses()
         except ApiClientError as exc:
             messagebox.showerror(
                 "Ошибка API/аутентификации",
@@ -805,8 +1452,10 @@ class KanbanTkApp(Tk):
         self.pockets_by_id = {int(p["id"]): p for p in pockets}
         self.projects_by_id = {int(p["id"]): p for p in projects}
         self.tasks_all = tasks
+        self.timeline_pauses_by_task_id = self._group_pauses_by_task_id(pauses)
         self._apply_filters()
         self._refresh_kanban_board()
+        self._refresh_timeline()
 
     def _on_session_click(self, _: object) -> None:
         if not self.session_user:
@@ -1936,6 +2585,7 @@ class KanbanTkApp(Tk):
         self.global_filter_context.preset_name = DEFAULT_PRESET_NAME
         self.global_filter_context.dashboard_visible = False
         self.global_filter_context.kanban_visible = False
+        self.global_filter_context.timeline_visible = False
         self.selected_project_id = None
         if hasattr(self, "top_tree"):
             self._suppress_top_select_event = True
@@ -1945,6 +2595,7 @@ class KanbanTkApp(Tk):
                 self._suppress_top_select_event = False
         self._apply_global_filter_context_to_zone("dashboard")
         self._apply_global_filter_context_to_zone("kanban")
+        self._apply_global_filter_context_to_zone("timeline")
         if hasattr(self, "preset_var"):
             self.preset_var.set(DEFAULT_PRESET_NAME)
         if hasattr(self, "kanban_preset_var"):
@@ -1961,12 +2612,17 @@ class KanbanTkApp(Tk):
             visible=self.kanban_filter_visible,
         )
         self._apply_global_filter_context_to_zone("dashboard")
+        self._apply_global_filter_context_to_zone("timeline")
         if hasattr(self, "preset_var"):
             preset_name = self.global_filter_context.preset_name
             self.preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
+        if "timeline_preset_var" in self.__dict__:
+            preset_name = self.global_filter_context.preset_name
+            self.timeline_preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
         self._refresh_dashboard_top_table_from_filter_context()
         self._refresh_dashboard_bottom_table_from_selection_and_filter()
         self._refresh_kanban_board()
+        self._refresh_timeline()
 
     def _refresh_kanban_board(self) -> None:
         if not hasattr(self, "kanban_columns"):
@@ -2796,6 +3452,7 @@ class KanbanTkApp(Tk):
         self.global_filter_context.preset_name = DEFAULT_PRESET_NAME
         self.global_filter_context.dashboard_visible = False
         self.global_filter_context.kanban_visible = False
+        self.global_filter_context.timeline_visible = False
         self.selected_project_id = None
         if hasattr(self, "top_tree"):
             self._suppress_top_select_event = True
@@ -2805,6 +3462,7 @@ class KanbanTkApp(Tk):
                 self._suppress_top_select_event = False
         self._apply_global_filter_context_to_zone("dashboard")
         self._apply_global_filter_context_to_zone("kanban")
+        self._apply_global_filter_context_to_zone("timeline")
         if hasattr(self, "preset_var"):
             self.preset_var.set(DEFAULT_PRESET_NAME)
         if hasattr(self, "kanban_preset_var"):
@@ -2998,12 +3656,17 @@ class KanbanTkApp(Tk):
                 visible=self.filter_visible,
             )
             self._apply_global_filter_context_to_zone("kanban")
+            self._apply_global_filter_context_to_zone("timeline")
             if hasattr(self, "kanban_preset_var"):
                 preset_name = self.global_filter_context.preset_name
                 self.kanban_preset_var.set(preset_name if preset_name in self.kanban_presets else DEFAULT_PRESET_NAME)
+            if "timeline_preset_var" in self.__dict__:
+                preset_name = self.global_filter_context.preset_name
+                self.timeline_preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
             self._refresh_dashboard_top_table_from_filter_context()
             self._refresh_dashboard_bottom_table_from_selection_and_filter()
             self._refresh_kanban_board()
+            self._refresh_timeline()
             self._refresh_global_filter_indicators()
         finally:
             self._in_filter_refresh = False
@@ -3085,8 +3748,11 @@ class KanbanTkApp(Tk):
             visible=self.filter_visible,
         )
         self._apply_global_filter_context_to_zone("kanban")
+        self._apply_global_filter_context_to_zone("timeline")
         if hasattr(self, "kanban_preset_var"):
             self.kanban_preset_var.set(name if name in self.kanban_presets else DEFAULT_PRESET_NAME)
+        if "timeline_preset_var" in self.__dict__:
+            self.timeline_preset_var.set(name if name in self.presets else DEFAULT_PRESET_NAME)
 
     def _save_current_preset(self) -> None:
         name = simpledialog.askstring("Сохранить пресет", "Имя пресета:", parent=self)
@@ -3186,8 +3852,11 @@ class KanbanTkApp(Tk):
             visible=self.kanban_filter_visible,
         )
         self._apply_global_filter_context_to_zone("dashboard")
+        self._apply_global_filter_context_to_zone("timeline")
         if hasattr(self, "preset_var"):
             self.preset_var.set(name if name in self.presets else DEFAULT_PRESET_NAME)
+        if "timeline_preset_var" in self.__dict__:
+            self.timeline_preset_var.set(name if name in self.presets else DEFAULT_PRESET_NAME)
 
     def _serialize_kanban_filters(self) -> list[dict[str, str]]:
         return self._serialize_filter_rows(self.kanban_filter_rows)
@@ -3255,14 +3924,16 @@ class KanbanTkApp(Tk):
         messagebox.showinfo("Тема", "Переключение темы временно отключено. Используется светлая тема.")
 
     def _set_theme(self, theme_name: str) -> None:
-        del theme_name
-        if self.theme_name != DEFAULT_THEME_NAME:
-            self.theme_tokens = self._load_theme_tokens_with_fallback(DEFAULT_THEME_NAME)
-            self.theme_name = DEFAULT_THEME_NAME
-            self.theme_var.set(self.theme_name)
-            self.role_colors = self._role_palette_for_theme(self.theme_name)
-            self._save_theme_name(self.theme_name)
-            self._rebuild_ui()
+        tokens = self._load_theme_tokens_with_fallback(theme_name)
+        new_theme_name = str(tokens.get("id", DEFAULT_THEME_NAME))
+        if new_theme_name == self.theme_name and self.theme_tokens == tokens:
+            return
+        self.theme_tokens = tokens
+        self.theme_name = new_theme_name
+        self.theme_var.set(self.theme_name)
+        self.role_colors = self._role_palette_for_theme(self.theme_name)
+        self._save_theme_name(self.theme_name)
+        self._rebuild_ui()
 
     def _theme_in_development(self) -> None:
         self._toggle_theme()
@@ -3423,9 +4094,12 @@ class KanbanTkApp(Tk):
         self._widget_tooltip = tip
 
     def _hide_widget_tooltip(self, _event: object | None = None) -> None:
-        if self._widget_tooltip and self._widget_tooltip.winfo_exists():
-            self._widget_tooltip.destroy()
+        tip = self.__dict__.get("_widget_tooltip")
+        if tip and tip.winfo_exists():
+            tip.destroy()
         self._widget_tooltip = None
+        if hasattr(self, "_timeline_hover_task_id"):
+            self._timeline_hover_task_id = None
 
     def _show_kanban_filter_tooltip(self, _event: object) -> None:
         self._hide_kanban_filter_tooltip()
@@ -3532,6 +4206,8 @@ class KanbanTkApp(Tk):
         style.configure("KanbanColumn.TLabelframe", background=self._theme_color("surface_bg", "#F7F8F5"), bordercolor=self._theme_color("border", "#D8DDD8"))
         style.configure("KanbanColumn.TLabelframe.Label", background=self._theme_color("surface_bg", "#F7F8F5"), foreground=self._theme_color("text_primary", "#1F2A2A"))
         style.configure("Treeview", background=self._theme_color("surface_panel", "#FFFFFF"), fieldbackground=self._theme_color("surface_panel", "#FFFFFF"), foreground=self._theme_color("text_primary", "#1F2A2A"))
+        style.configure("Timeline.Treeview", rowheight=TIMELINE_ROW_HEIGHT)
+        style.map("Timeline.Treeview", background=[("selected", self._theme_color("selection_bg", "#6E8B74"))], foreground=[("selected", self._theme_color("selection_fg", "#FFFFFF"))])
         style.map("Treeview", background=[("selected", self._theme_color("selection_bg", "#6E8B74"))], foreground=[("selected", self._theme_color("selection_fg", "#FFFFFF"))])
         style.configure("TEntry", fieldbackground=self._theme_color("surface_panel", "#FFFFFF"), foreground=self._theme_color("text_primary", "#1F2A2A"))
         style.configure("TCombobox", fieldbackground=self._theme_color("surface_panel", "#FFFFFF"), foreground=self._theme_color("text_primary", "#1F2A2A"))
@@ -3549,6 +4225,8 @@ class KanbanTkApp(Tk):
         self.option_add("*TCombobox*Listbox.selectForeground", self._theme_color("selection_fg", "#FFFFFF"))
         for canvas in getattr(self, "kanban_column_canvases", {}).values():
             canvas.configure(bg=self._theme_color("surface_bg", "#F7F8F5"))
+        if hasattr(self, "timeline_canvas") and self.timeline_canvas:
+            self.timeline_canvas.configure(bg=self._theme_color("surface_panel", "#FFFFFF"))
         self._load_kanban_icons(self.theme_name)
 
     def _setup_forest_theme(self) -> None:

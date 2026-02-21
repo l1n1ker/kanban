@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from datetime import date
 
 import pytest
 
@@ -244,3 +245,254 @@ def test_kanban_card_actions_do_not_toggle_kanban_filter_panel() -> None:
     app._kanban_task_action(1, "start")
     assert app.kanban_filter_visible is False
     assert app.global_filter_context.kanban_visible is False
+
+
+def test_timeline_interval_fallback_dates() -> None:
+    app = _new_app()
+    task = {"date_created": "2026-02-01", "date_start_work": None, "date_done": None}
+    start, end = app._task_timeline_bounds(task)
+    assert start == date(2026, 2, 1)
+    assert end >= start
+
+
+def test_timeline_truncate_description_40_chars() -> None:
+    app = _new_app()
+    src = "x" * 50
+    result = app._truncate_timeline_text(src, 40)
+    assert len(result) == 40
+    assert result.endswith("...")
+
+
+def test_timeline_full_text_cache_by_task_id() -> None:
+    app = _new_app()
+    app._build_filtered_task_rows = lambda: [{"id": 7, "description": "a" * 60, "status": "Создана"}]
+    app._apply_timeline_slice = lambda rows: rows
+    app._task_timeline_bounds = lambda _r: (date(2026, 2, 1), date(2026, 2, 2))
+    app._timeline_slice_bounds = lambda show_errors=False: (date(2026, 2, 1), date(2026, 2, 28))
+    app._draw_timeline_axis = lambda *_a, **_k: 16
+    app._draw_timeline_row_grid = lambda **_k: None
+    app._draw_timeline_row = lambda *_a, **_k: None
+    app._hide_widget_tooltip = lambda *_a, **_k: None
+    app._theme_color = lambda *_a, **_k: "#000000"
+
+    class DummyTree:
+        def __bool__(self) -> bool:
+            return True
+
+        def get_children(self) -> list[str]:
+            return []
+
+        def delete(self, *_args: object) -> None:
+            return None
+
+        def insert(self, _p: str, _e: str, iid: str, values: tuple[object, ...]) -> None:
+            assert iid == "7"
+            assert str(values[1]).endswith("...")
+
+    class DummyCanvas:
+        def __bool__(self) -> bool:
+            return True
+
+        def delete(self, *_args: object) -> None:
+            return None
+
+        def create_text(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def configure(self, **_kwargs: object) -> None:
+            return None
+
+    app.timeline_rows_tree = DummyTree()
+    app.timeline_canvas = DummyCanvas()
+    app._refresh_timeline()
+    assert app.timeline_full_text_by_task_id[7] == "a" * 60
+
+
+def test_timeline_slice_intersection() -> None:
+    app = _new_app()
+    assert app._timeline_intersects_slice(date(2026, 2, 5), date(2026, 2, 10), date(2026, 2, 1), date(2026, 2, 7))
+    assert not app._timeline_intersects_slice(date(2026, 2, 8), date(2026, 2, 10), date(2026, 2, 1), date(2026, 2, 7))
+
+
+def test_timeline_axis_marks_monday_only_labels() -> None:
+    app = _new_app()
+    calls = {"text": 0}
+
+    class DummyCanvas:
+        def create_line(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def create_text(self, *_args: object, **_kwargs: object) -> None:
+            calls["text"] += 1
+
+    app.timeline_canvas = DummyCanvas()
+    app._theme_color = lambda *_a, **_k: "#000000"
+    start = date(2026, 2, 2)  # Monday
+    end = date(2026, 2, 15)
+    app._draw_timeline_axis(start, end, 20, 30, 30, 4)
+    # Labels: first day + Mondays in range (2 and 9)
+    assert calls["text"] == 2
+
+
+def test_timeline_axis_draws_daily_vertical_lines() -> None:
+    app = _new_app()
+    calls = {"line": 0}
+
+    class DummyCanvas:
+        def create_line(self, *_args: object, **_kwargs: object) -> None:
+            calls["line"] += 1
+
+        def create_text(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    app.timeline_canvas = DummyCanvas()
+    app._theme_color = lambda *_a, **_k: "#000000"
+    start = date(2026, 2, 1)
+    end = date(2026, 2, 3)
+    app._draw_timeline_axis(start, end, 20, 30, 30, 1)
+    assert calls["line"] == 4
+
+
+def test_timeline_global_filter_and_slice_intersection() -> None:
+    app = _new_app()
+
+    class DummyVar:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def get(self) -> str:
+            return self.value
+
+    app.timeline_slice_start_var = DummyVar("2026-02-01")
+    app.timeline_slice_end_var = DummyVar("2026-02-10")
+    rows = [
+        {"id": 1, "date_created": "2026-02-02", "date_start_work": "2026-02-03", "date_done": "2026-02-04"},
+        {"id": 2, "date_created": "2026-01-01", "date_start_work": "2026-01-02", "date_done": "2026-01-03"},
+    ]
+    result = app._apply_timeline_slice(rows)
+    assert [r["id"] for r in result] == [1]
+
+
+def test_task_pauses_grouping_by_task_id() -> None:
+    app = _new_app()
+    grouped = app._group_pauses_by_task_id(
+        [
+            {"id": 1, "task_id": 10, "date_start": "2026-02-02", "date_end": "2026-02-03"},
+            {"id": 2, "task_id": 10, "date_start": "2026-02-04", "date_end": "2026-02-05"},
+            {"id": 3, "task_id": 11, "date_start": "2026-02-06", "date_end": "2026-02-06"},
+        ]
+    )
+    assert set(grouped.keys()) == {10, 11}
+    assert len(grouped[10]) == 2
+    assert len(grouped[11]) == 1
+
+
+def test_timeline_period_validation() -> None:
+    app = _new_app()
+
+    class DummyVar:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def get(self) -> str:
+            return self.value
+
+    app.timeline_slice_start_var = DummyVar("2026-03-01")
+    app.timeline_slice_end_var = DummyVar("2026-02-01")
+    assert app._timeline_slice_bounds(show_errors=False) is None
+
+
+def test_timeline_period_is_post_filter() -> None:
+    app = _new_app()
+    app._build_filtered_task_rows = lambda: [{"id": 1}, {"id": 2}]
+    app._apply_timeline_slice = lambda rows: [r for r in rows if r["id"] == 1]
+    captured = {"rows": []}
+
+    class DummyTree:
+        def __bool__(self) -> bool:
+            return True
+
+        def get_children(self) -> list[str]:
+            return []
+
+        def delete(self, *_args: object) -> None:
+            return None
+
+        def insert(self, _p: str, _e: str, iid: str, values: tuple[object, ...]) -> None:
+            captured["rows"].append((iid, values))
+
+    class DummyCanvas:
+        def __bool__(self) -> bool:
+            return True
+
+        def delete(self, *_args: object) -> None:
+            return None
+
+        def create_text(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def configure(self, **_kwargs: object) -> None:
+            return None
+
+    app.timeline_rows_tree = DummyTree()
+    app.timeline_canvas = DummyCanvas()
+    app._task_timeline_bounds = lambda _r: (date(2026, 2, 1), date(2026, 2, 2))
+    app._timeline_slice_bounds = lambda show_errors=False: (date(2026, 2, 1), date(2026, 2, 28))
+    app._draw_timeline_axis = lambda *_a, **_k: 16
+    app._draw_timeline_row_grid = lambda **_k: None
+    app._draw_timeline_row = lambda *_a, **_k: None
+    app._theme_color = lambda *_a, **_k: "#000000"
+    app._refresh_timeline()
+    assert len(captured["rows"]) == 1
+    assert captured["rows"][0][0] == "1"
+
+
+def test_timeline_period_does_not_mutate_global_context_rows() -> None:
+    app = _new_app()
+    app.global_filter_context = ui_main.FilterContext(rows=[ui_main.FilterRowState(field="status", op="!=", value="Завершена")])
+    before = [(r.field, r.op, r.value) for r in app.global_filter_context.rows]
+    app._timeline_slice_bounds = lambda show_errors=True: (date(2026, 2, 1), date(2026, 2, 28))
+    app._refresh_timeline = lambda: None
+    app._apply_timeline_period()
+    after = [(r.field, r.op, r.value) for r in app.global_filter_context.rows]
+    assert before == after
+
+
+def test_dashboard_kanban_unaffected_by_timeline_period() -> None:
+    app = _new_app()
+    calls = {"filters": 0, "kanban": 0, "timeline": 0}
+    app._apply_filters = lambda: calls.__setitem__("filters", calls["filters"] + 1)
+    app._refresh_kanban_board = lambda: calls.__setitem__("kanban", calls["kanban"] + 1)
+    app._refresh_timeline = lambda: calls.__setitem__("timeline", calls["timeline"] + 1)
+    app._timeline_slice_bounds = lambda show_errors=True: (date(2026, 2, 1), date(2026, 2, 28))
+    app._apply_timeline_period()
+    assert calls["timeline"] == 1
+    assert calls["filters"] == 0
+    assert calls["kanban"] == 0
+
+
+def test_timeline_filter_panel_controls_present() -> None:
+    src = inspect.getsource(ui_main.KanbanTkApp._build_timeline_filter_panel)
+    assert "timeline_preset_combo" in src
+    assert "_save_current_timeline_preset" in src
+    assert "_rename_timeline_preset" in src
+    assert "_add_timeline_filter_row" in src
+
+
+def test_timeline_labels_do_not_contain_question_placeholders() -> None:
+    src = inspect.getsource(ui_main.KanbanTkApp._build_timeline)
+    assert "????" not in src
+
+
+def test_timeline_row_alignment_formula_stable() -> None:
+    src = inspect.getsource(ui_main.KanbanTkApp._draw_timeline_row)
+    assert "y = top_pad + idx * row_h" in src
+
+
+def test_timeline_split_ratio_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _new_app()
+    cfg = tmp_path / "ui_config.json"
+    monkeypatch.setattr(ui_main, "_ui_config_file", lambda: str(cfg))
+    app._save_timeline_split_ratio(0.42)
+    loaded = app._load_timeline_split_ratio()
+    assert loaded == pytest.approx(0.42)
