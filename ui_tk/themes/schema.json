@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PocketFlow Theme",
+  "type": "object",
+  "required": [
+    "id",
+    "base_ttk_theme",
+    "colors",
+    "roles",
+    "icons"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "base_ttk_theme": {
+      "type": "string"
+    },
+    "colors": {
+      "type": "object",
+      "required": [
+        "surface_bg",
+        "surface_panel",
+        "text_primary",
+        "text_muted",
+        "accent",
+        "accent_hover",
+        "selection_bg",
+        "selection_fg",
+        "border",
+        "danger",
+        "warning",
+        "info",
+        "success"
+      ],
+      "additionalProperties": true
+    },
+    "roles": {
+      "type": "object",
+      "required": [
+        "admin",
+        "head",
+        "teamlead",
+        "curator",
+        "executor"
+      ],
+      "additionalProperties": true
+    },
+    "icons": {
+      "type": "object",
+      "required": [
+        "palette"
+      ],
+      "properties": {
+        "palette": {
+          "type": "string",
+          "enum": [
+            "light",
+            "dark"
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

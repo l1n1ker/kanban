@@ -1,1 +1,1 @@
-"""HTTP layer package for the Project Kanban backend."""
+"""HTTP layer package for the PocketFlow backend."""

@@ -1,4 +1,4 @@
-"""FastAPI application for Project Kanban."""
+"""FastAPI application for PocketFlow."""
 from __future__ import annotations
 
 from fastapi import FastAPI
@@ -15,7 +15,7 @@ from backend.http.routes_users import router as users_router
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Project Kanban API")
+    app = FastAPI(title="PocketFlow API")
 
     @app.on_event("startup")
     def _init_db() -> None:
@@ -23,7 +23,7 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     def root() -> dict[str, str]:
-        return {"message": "Project Kanban API"}
+        return {"message": "PocketFlow API"}
 
     app.include_router(users_router)
     app.include_router(session_router)

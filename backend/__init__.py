@@ -1,1 +1,1 @@
-"""Backend package for Project Kanban."""
+"""Backend package for PocketFlow."""

@@ -1,15 +1,19 @@
-"""Tkinter desktop UI for Project Kanban."""
+"""Tkinter desktop UI for PocketFlow."""
 from __future__ import annotations
 
 import json
 import os
 import getpass
+import csv
+from collections import defaultdict
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
+from statistics import median
 from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, BooleanVar, Canvas, PhotoImage, StringVar, Tk, Toplevel
 from tkinter import font as tkfont
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any
 
 from ui_tk.api_client import ApiClient, ApiClientError
@@ -20,9 +24,15 @@ except Exception:
     Calendar = None
 
 try:
-    from PIL import ImageTk
+    from PIL import Image, ImageTk
 except Exception:
+    Image = None
     ImageTk = None
+
+try:
+    from openpyxl import Workbook
+except Exception:
+    Workbook = None
 
 
 DEFAULT_PRESET_NAME = "Активные задачи"
@@ -124,7 +134,7 @@ TIMELINE_DEFAULT_SPLIT_RATIO = 0.38
 
 def _app_dir() -> str:
     base = os.getenv("APPDATA") or os.path.expanduser("~")
-    path = os.path.join(base, "project-kanban")
+    path = os.path.join(base, "pocketflow")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -143,6 +153,14 @@ def _ui_config_file() -> str:
 
 def _themes_dir() -> str:
     return os.path.join(os.path.dirname(__file__), "themes")
+
+
+def _app_icon_file() -> str:
+    return os.path.join(_themes_dir(), "app.ico")
+
+
+def _app_logo_file() -> str:
+    return os.path.join(_themes_dir(), "logo.png")
 
 
 def _theme_file(theme_id: str) -> str:
@@ -186,6 +204,7 @@ class FilterContext:
     dashboard_visible: bool = False
     kanban_visible: bool = False
     timeline_visible: bool = False
+    analytics_visible: bool = False
     summary_short: str = "Фильтр: пуст"
     summary_full: str = "Фильтр пуст"
 
@@ -193,10 +212,23 @@ class FilterContext:
 class KanbanTkApp(Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Project Kanban - Tkinter UI")
+        self.title("PocketFlow")
         self.geometry("1400x860")
+        try:
+            self.state("zoomed")
+        except Exception:
+            try:
+                self.attributes("-zoomed", True)
+            except Exception:
+                pass
+        self._window_logo_image: PhotoImage | None = None
+        self._about_logo_image: PhotoImage | None = None
+        self._apply_window_icon(self)
         self.system_login = (os.getenv("PROJECT_KANBAN_LOGIN") or os.getenv("USERNAME") or getpass.getuser()).strip()
         self.api = ApiClient(actor_user_login=self.system_login)
+        self.db_settings = self._load_db_settings()
+        self.db_settings_window: Toplevel | None = None
+        self.user_guide_window: Toplevel | None = None
         self.session_user: dict[str, Any] | None = None
         self.session_var = StringVar(value=f"Сессия: login={self.system_login}")
         self.theme_name = self._load_theme_name()
@@ -242,6 +274,13 @@ class KanbanTkApp(Tk):
         self._timeline_hover_task_id: int | None = None
         self.timeline_split_ratio = self._load_timeline_split_ratio()
         self._syncing_timeline_scroll = False
+        self.analytics_filter_visible = False
+        self.analytics_filter_rows: list[FilterRow] = []
+        self.analytics_filter_summary_var = StringVar(value="Фильтр: пуст")
+        self.analytics_selected_slice: dict[str, Any] | None = None
+        self.analytics_details_tree: ttk.Treeview | None = None
+        self.analytics_charts: dict[str, Canvas] = {}
+        self.analytics_rows_cache: list[dict[str, Any]] = []
         self.global_filter_context = FilterContext(
             rows=[FilterRowState(logic="AND", field="status", op="!=", value="Завершена")]
         )
@@ -276,6 +315,7 @@ class KanbanTkApp(Tk):
         )
         self._apply_global_filter_context_to_zone("kanban")
         self._apply_global_filter_context_to_zone("timeline")
+        self._apply_global_filter_context_to_zone("analytics")
         self._show_zone("dashboard")
         self._load_dashboard_data()
 
@@ -288,10 +328,10 @@ class KanbanTkApp(Tk):
             "Задачи": self._open_tasks_window,
             "Пользователи": self._open_users_window,
             "Статусы": self._open_statuses_window,
-            "База данных": self._not_implemented,
-            "Экспорт": self._not_implemented,
+            "База данных": self._open_db_settings_window,
+            "Экспорт": self._open_export_window,
             "Информация о теме": self._show_theme_info,
-            "Руководство пользователя": self._not_implemented,
+            "Руководство пользователя": self._open_user_guide_window,
             "О программе": self._show_about,
         }
         self._menu_vars: list[StringVar] = []
@@ -329,12 +369,271 @@ class KanbanTkApp(Tk):
         self.zones["timeline"] = timeline
 
         analytics = ttk.Frame(container)
-        ttk.Label(analytics, text="Analytics (in progress)").pack(pady=30)
-        self.analytics_filter_summary_var = StringVar(value=self.global_filter_context.summary_short)
-        ttk.Label(analytics, textvariable=self.analytics_filter_summary_var, style="Surface.TLabel").pack(
-            side=BOTTOM, anchor="e", padx=12, pady=12
-        )
+        self._build_analytics(analytics)
         self.zones["analytics"] = analytics
+
+    def _build_analytics(self, parent: ttk.Frame) -> None:
+        toolbar = ttk.Frame(parent, padding=(8, 8))
+        toolbar.pack(fill="x")
+        self._mk_button(toolbar, "Обновить", self._load_dashboard_data).pack(side=LEFT, padx=2)
+
+        self.analytics_filter_panel = ttk.Frame(parent, padding=(8, 8))
+        self._build_analytics_filter_panel(self.analytics_filter_panel)
+
+        content = ttk.Frame(parent, padding=(8, 8))
+        content.pack(fill=BOTH, expand=True)
+        content.grid_rowconfigure(0, weight=1)
+        content.grid_columnconfigure(0, weight=1)
+
+        self.analytics_content_canvas = Canvas(content, highlightthickness=0, bd=0, bg=self._theme_color("surface_bg", "#F7F8F5"))
+        analytics_vscroll = ttk.Scrollbar(content, orient=VERTICAL, command=self.analytics_content_canvas.yview)
+        self.analytics_content_canvas.configure(yscrollcommand=analytics_vscroll.set)
+        self.analytics_content_canvas.grid(row=0, column=0, sticky="nsew")
+        analytics_vscroll.grid(row=0, column=1, sticky="ns")
+
+        self.analytics_content_inner = ttk.Frame(self.analytics_content_canvas, style="Surface.TFrame")
+        self.analytics_content_window = self.analytics_content_canvas.create_window((0, 0), window=self.analytics_content_inner, anchor="nw")
+        self.analytics_content_inner.bind(
+            "<Configure>",
+            lambda _e: self.analytics_content_canvas.configure(scrollregion=self.analytics_content_canvas.bbox("all")),
+        )
+        self.analytics_content_canvas.bind(
+            "<Configure>",
+            lambda e: self.analytics_content_canvas.itemconfigure(self.analytics_content_window, width=max(1, int(getattr(e, "width", 1)))),
+        )
+
+        self.analytics_content_inner.grid_columnconfigure(0, weight=1, uniform="analytics")
+        self.analytics_content_inner.grid_columnconfigure(1, weight=1, uniform="analytics")
+        self.analytics_charts = {}
+        chart_defs = [
+            ("status_distribution", "\u0420\u0430\u0441\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0438\u0435 \u043f\u043e \u0441\u0442\u0430\u0442\u0443\u0441\u0430\u043c"),
+            ("wip_by_executor", "WIP \u043f\u043e \u0438\u0441\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044f\u043c"),
+            ("throughput_by_week", "\u041f\u0440\u043e\u043f\u0443\u0441\u043a\u043d\u0430\u044f \u0441\u043f\u043e\u0441\u043e\u0431\u043d\u043e\u0441\u0442\u044c \u043f\u043e \u043d\u0435\u0434\u0435\u043b\u044f\u043c"),
+            ("cycle_time_by_project", "Cycle time \u043f\u043e \u043f\u0440\u043e\u0435\u043a\u0442\u0430\u043c"),
+            ("lead_time_by_pocket", "Lead time \u043f\u043e \u043a\u0430\u0440\u043c\u0430\u043d\u0430\u043c"),
+            ("overdue_tasks", "\u041f\u0440\u043e\u0441\u0440\u043e\u0447\u0435\u043d\u043d\u044b\u0435 \u0437\u0430\u0434\u0430\u0447\u0438"),
+            ("pause_ratio_by_executor", "\u0414\u043e\u043b\u044f \u043f\u0430\u0443\u0437 \u043f\u043e \u0438\u0441\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044f\u043c"),
+            ("queue_age", "\u0412\u043e\u0437\u0440\u0430\u0441\u0442 \u043e\u0447\u0435\u0440\u0435\u0434\u0438"),
+        ]
+        for idx, (key, title) in enumerate(chart_defs):
+            card = ttk.Labelframe(self.analytics_content_inner, text=title, style="KanbanColumn.TLabelframe")
+            card.grid(row=idx // 2, column=idx % 2, sticky="nsew", padx=6, pady=6)
+            canvas = Canvas(card, height=190, highlightthickness=0, bd=0, bg=self._theme_color("surface_panel", "#FFFFFF"))
+            canvas.pack(fill=BOTH, expand=True)
+            self.analytics_charts[key] = canvas
+
+        details_wrap = ttk.Labelframe(self.analytics_content_inner, text="Детализация", style="KanbanColumn.TLabelframe")
+        details_wrap.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=6, pady=(8, 6))
+        details_wrap.grid_columnconfigure(0, weight=1)
+        details_wrap.grid_rowconfigure(0, weight=1)
+        cols = ("id", "description", "status", "project_name", "pocket_name", "executor_full_name", "date_created", "date_done")
+        self.analytics_details_tree = ttk.Treeview(details_wrap, columns=cols, show="headings")
+        headers = {
+            "id": "ID",
+            "description": "Описание",
+            "status": "Статус",
+            "project_name": "Проект",
+            "pocket_name": "Карман",
+            "executor_full_name": "Исполнитель",
+            "date_created": "Создана",
+            "date_done": "Завершена",
+        }
+        for col in cols:
+            self.analytics_details_tree.heading(col, text=headers[col])
+            self.analytics_details_tree.column(col, width=120, anchor="w")
+        self.analytics_details_tree.column("id", width=70, anchor="center")
+        self.analytics_details_tree.column("description", width=320, anchor="w")
+        self.analytics_details_tree.grid(row=0, column=0, sticky="nsew")
+        details_scroll = ttk.Scrollbar(details_wrap, orient=VERTICAL, command=self.analytics_details_tree.yview)
+        self.analytics_details_tree.configure(yscrollcommand=details_scroll.set)
+        details_scroll.grid(row=0, column=1, sticky="ns")
+        self.analytics_details_tree.bind("<Double-1>", self._on_analytics_details_double_click)
+
+        self.analytics_bottom_controls = ttk.Frame(parent, padding=(8, 8))
+        self.analytics_bottom_controls.pack(fill="x")
+        self._mk_button(self.analytics_bottom_controls, "Фильтр", self._toggle_analytics_filter_panel).pack(side=LEFT, padx=2)
+        self._mk_button(self.analytics_bottom_controls, "Сброс фильтра", self._reset_kanban_filters).pack(side=LEFT, padx=2)
+        self.analytics_clear_drill_btn = self._mk_button(self.analytics_bottom_controls, "Снять детализацию", self._clear_analytics_drilldown)
+        self.analytics_clear_drill_btn.pack(side=LEFT, padx=(2, 10))
+        self.analytics_clear_drill_btn.state(["disabled"])
+        self.analytics_filter_label = ttk.Label(self.analytics_bottom_controls, textvariable=self.analytics_filter_summary_var, style="Surface.TLabel", cursor="hand2")
+        self.analytics_filter_label.pack(side=LEFT, padx=12)
+        self.analytics_filter_label.bind("<Enter>", self._show_filter_tooltip)
+        self.analytics_filter_label.bind("<Leave>", self._hide_filter_tooltip)
+        self.analytics_session_label = ttk.Label(self.analytics_bottom_controls, textvariable=self.session_var, cursor="hand2", style="Session.TLabel", padding=(8, 2))
+        self.analytics_session_label.pack(side=RIGHT, padx=6)
+        self.analytics_session_label.bind("<Button-1>", self._on_session_click)
+
+        self._apply_analytics_preset(DEFAULT_PRESET_NAME)
+        self._refresh_analytics()
+
+    def _build_analytics_filter_panel(self, parent: ttk.Frame) -> None:
+        presets_bar = ttk.Frame(parent)
+        presets_bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(presets_bar, text="Пресет:").pack(side=LEFT)
+        self.analytics_preset_var = StringVar(value=DEFAULT_PRESET_NAME)
+        self.analytics_preset_combo = ttk.Combobox(
+            presets_bar,
+            textvariable=self.analytics_preset_var,
+            values=sorted(self.presets.keys()),
+            state="readonly",
+            width=28,
+        )
+        self.analytics_preset_combo.pack(side=LEFT, padx=6)
+        self._mk_button(presets_bar, "Применить", self._apply_selected_analytics_preset).pack(side=LEFT, padx=2)
+        self._mk_button(presets_bar, "Сохранить текущий", self._save_current_analytics_preset).pack(side=LEFT, padx=2)
+        self._mk_button(presets_bar, "Переименовать", self._rename_analytics_preset).pack(side=LEFT, padx=2)
+        self._mk_button(presets_bar, "Удалить", self._delete_analytics_preset).pack(side=LEFT, padx=2)
+
+        self.analytics_rows_holder = ttk.Frame(parent)
+        self.analytics_rows_holder.pack(fill="x")
+        controls = ttk.Frame(parent)
+        controls.pack(fill="x", pady=(6, 0))
+        self._mk_button(controls, "+ Условие", self._add_analytics_filter_row).pack(side=LEFT)
+        self._mk_button(controls, "Применить", self._apply_analytics_filters).pack(side=LEFT, padx=4)
+
+    def _toggle_analytics_filter_panel(self) -> None:
+        self.analytics_filter_visible = not self.analytics_filter_visible
+        if self.analytics_filter_visible:
+            self.analytics_filter_panel.pack(fill="x", before=self.analytics_bottom_controls)
+        else:
+            self.analytics_filter_panel.pack_forget()
+        self._sync_global_filter_context_from_rows(
+            self.analytics_filter_rows,
+            zone="analytics",
+            preset_name=self.analytics_preset_var.get() if "analytics_preset_var" in self.__dict__ else DEFAULT_PRESET_NAME,
+            visible=self.analytics_filter_visible,
+        )
+
+    def _add_analytics_filter_row(self, field: str = "status", op: str = "==", value: str = "", logic: str = "AND") -> None:
+        row = ttk.Frame(self.analytics_rows_holder)
+        row.pack(fill="x", pady=2)
+        logic_var = StringVar(value=logic)
+        field_var = StringVar(value=field)
+        op_var = StringVar(value=op)
+        value_var = StringVar(value=value)
+        if self.analytics_filter_rows:
+            ttk.Combobox(row, textvariable=logic_var, values=["AND", "OR"], width=6, state="readonly").pack(side=LEFT, padx=2)
+        else:
+            ttk.Label(row, text="").pack(side=LEFT, padx=2)
+        ttk.Combobox(
+            row,
+            textvariable=field_var,
+            values=[
+                "id", "description", "status", "date_created", "date_start_work", "date_done",
+                "executor_full_name", "executor_user_id", "customer", "code_link", "project_id",
+                "project_name", "pocket_id", "pocket_name",
+            ],
+            width=18,
+            state="readonly",
+        ).pack(side=LEFT, padx=2)
+        ttk.Combobox(row, textvariable=op_var, values=["==", "!=", "in", "contains", "between", ">", "<", ">=", "<="], width=10, state="readonly").pack(side=LEFT, padx=2)
+        ttk.Entry(row, textvariable=value_var, width=36).pack(side=LEFT, padx=2)
+        self._mk_button(row, "x", lambda r=row: self._remove_analytics_filter_row(r), width=3).pack(side=LEFT, padx=2)
+        self.analytics_filter_rows.append(FilterRow(row, logic_var, field_var, op_var, value_var))
+        self._refresh_global_filter_indicators()
+
+    def _remove_analytics_filter_row(self, row_frame: ttk.Frame) -> None:
+        for idx, item in enumerate(self.analytics_filter_rows):
+            if item.frame == row_frame:
+                item.frame.destroy()
+                self.analytics_filter_rows.pop(idx)
+                break
+        self._apply_analytics_filters()
+
+    def _apply_analytics_filters(self) -> None:
+        self._sync_global_filter_context_from_rows(
+            self.analytics_filter_rows,
+            zone="analytics",
+            preset_name=self.analytics_preset_var.get() if hasattr(self, "analytics_preset_var") else DEFAULT_PRESET_NAME,
+            visible=self.analytics_filter_visible,
+        )
+        self._apply_global_filter_context_to_zone("dashboard")
+        self._apply_global_filter_context_to_zone("kanban")
+        self._apply_global_filter_context_to_zone("timeline")
+        self._apply_global_filter_context_to_zone("analytics")
+        self._apply_global_filter_context_to_zone("analytics")
+        if hasattr(self, "preset_var"):
+            preset_name = self.global_filter_context.preset_name
+            self.preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
+        if hasattr(self, "kanban_preset_var"):
+            preset_name = self.global_filter_context.preset_name
+            self.kanban_preset_var.set(preset_name if preset_name in self.kanban_presets else DEFAULT_PRESET_NAME)
+        if "timeline_preset_var" in self.__dict__:
+            preset_name = self.global_filter_context.preset_name
+            self.timeline_preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
+        self._refresh_dashboard_top_table_from_filter_context()
+        self._refresh_dashboard_bottom_table_from_selection_and_filter()
+        self._refresh_kanban_board()
+        self._refresh_timeline()
+        self._refresh_analytics()
+
+    def _apply_selected_analytics_preset(self) -> None:
+        self._apply_analytics_preset(self.analytics_preset_var.get())
+        self._apply_analytics_filters()
+
+    def _apply_analytics_preset(self, name: str) -> None:
+        preset = self.presets.get(name)
+        if not preset:
+            return
+        for row in self.analytics_filter_rows:
+            row.frame.destroy()
+        self.analytics_filter_rows.clear()
+        for cond in preset.get("filters", []):
+            self._add_analytics_filter_row(
+                field=cond.get("field", "status"),
+                op=cond.get("op", "=="),
+                value=cond.get("value", ""),
+                logic=cond.get("logic", "AND"),
+            )
+        self.analytics_filter_visible = bool(preset.get("filter_visible", False))
+        if self.analytics_filter_visible:
+            self.analytics_filter_panel.pack(fill="x", before=self.analytics_bottom_controls)
+        else:
+            self.analytics_filter_panel.pack_forget()
+        self._sync_global_filter_context_from_rows(self.analytics_filter_rows, zone="analytics", preset_name=name, visible=self.analytics_filter_visible)
+
+    def _save_current_analytics_preset(self) -> None:
+        name = simpledialog.askstring("Сохранить пресет", "Имя пресета:", parent=self)
+        if not name:
+            return
+        self.presets[name] = {
+            "filter_visible": self.analytics_filter_visible,
+            "filters": self._serialize_filter_rows(self.analytics_filter_rows),
+        }
+        self._save_presets(self.presets)
+        self._refresh_preset_combo()
+        if hasattr(self, "analytics_preset_combo"):
+            self.analytics_preset_combo["values"] = sorted(self.presets.keys())
+        self.analytics_preset_var.set(name)
+
+    def _rename_analytics_preset(self) -> None:
+        old = self.analytics_preset_var.get()
+        if old not in self.presets:
+            return
+        new = simpledialog.askstring("Переименовать пресет", "Новое имя:", initialvalue=old, parent=self)
+        if not new or new == old:
+            return
+        self.presets[new] = self.presets.pop(old)
+        self._save_presets(self.presets)
+        self._refresh_preset_combo()
+        if hasattr(self, "analytics_preset_combo"):
+            self.analytics_preset_combo["values"] = sorted(self.presets.keys())
+        self.analytics_preset_var.set(new)
+
+    def _delete_analytics_preset(self) -> None:
+        name = self.analytics_preset_var.get()
+        if name == DEFAULT_PRESET_NAME:
+            messagebox.showwarning("Ограничение", "Пресет по умолчанию удалить нельзя.")
+            return
+        if name in self.presets:
+            del self.presets[name]
+            self._save_presets(self.presets)
+            self._refresh_preset_combo()
+            if hasattr(self, "analytics_preset_combo"):
+                self.analytics_preset_combo["values"] = sorted(self.presets.keys())
+            self.analytics_preset_var.set(DEFAULT_PRESET_NAME)
+            self._apply_analytics_preset(DEFAULT_PRESET_NAME)
 
     def _build_dashboard(self, parent: ttk.Frame) -> None:
         toolbar = ttk.Frame(parent, padding=(8, 8))
@@ -847,10 +1146,13 @@ class KanbanTkApp(Tk):
             self.preset_var.set(self.global_filter_context.preset_name if self.global_filter_context.preset_name in self.presets else DEFAULT_PRESET_NAME)
         if hasattr(self, "kanban_preset_var"):
             self.kanban_preset_var.set(self.global_filter_context.preset_name if self.global_filter_context.preset_name in self.kanban_presets else DEFAULT_PRESET_NAME)
+        if hasattr(self, "analytics_preset_var"):
+            self.analytics_preset_var.set(self.global_filter_context.preset_name if self.global_filter_context.preset_name in self.presets else DEFAULT_PRESET_NAME)
         self._refresh_dashboard_top_table_from_filter_context()
         self._refresh_dashboard_bottom_table_from_selection_and_filter()
         self._refresh_kanban_board()
         self._refresh_timeline()
+        self._refresh_analytics()
 
     def _apply_selected_timeline_preset(self) -> None:
         self._apply_timeline_preset(self.timeline_preset_var.get())
@@ -1161,6 +1463,276 @@ class KanbanTkApp(Tk):
         height = top_pad + len(rows) * row_h + 20
         self.timeline_canvas.configure(scrollregion=(0, 0, width, height))
 
+    def _replace_analytics_filter_rows_from_context(self) -> None:
+        if not hasattr(self, "analytics_rows_holder"):
+            return
+        for row in self.analytics_filter_rows:
+            row.frame.destroy()
+        self.analytics_filter_rows.clear()
+        for cond in self.global_filter_context.rows:
+            self._add_analytics_filter_row(
+                field=cond.field or "status",
+                op=cond.op or "==",
+                value=cond.value,
+                logic=cond.logic or "AND",
+            )
+        self.analytics_filter_visible = bool(self.global_filter_context.analytics_visible)
+        if self.analytics_filter_visible:
+            self.analytics_filter_panel.pack(fill="x", before=self.analytics_bottom_controls)
+        else:
+            self.analytics_filter_panel.pack_forget()
+
+    def _compute_analytics_dataset(self, rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        today = date.today()
+        stats: list[dict[str, Any]] = []
+        for row in rows:
+            task_id = int(row.get("id", 0))
+            start = self._parse_iso_date(row.get("date_start_work")) or self._parse_iso_date(row.get("date_created")) or today
+            end = self._parse_iso_date(row.get("date_done")) or today
+            if end < start:
+                end = start
+            created = self._parse_iso_date(row.get("date_created")) or start
+            pause_days = 0
+            for pause in self.timeline_pauses_by_task_id.get(task_id, []):
+                p_start = self._parse_iso_date(pause.get("date_start"))
+                p_end = self._parse_iso_date(pause.get("date_end")) or today
+                if not p_start:
+                    continue
+                if p_end < p_start:
+                    p_end = p_start
+                pause_days += (p_end - p_start).days + 1
+            cycle_days = max(1, (end - start).days + 1)
+            lead_days = max(1, (end - created).days + 1)
+            stats.append({"row": row, "task_id": task_id, "start": start, "end": end, "cycle_days": cycle_days, "lead_days": lead_days, "pause_days": pause_days})
+
+        charts: dict[str, list[dict[str, Any]]] = {}
+
+        status_groups: dict[str, list[int]] = defaultdict(list)
+        for st in stats:
+            status_groups[str(st["row"].get("status", "")).strip() or "-"].append(st["task_id"])
+        charts["status_distribution"] = [
+            {"label": label, "value": len(ids), "row_ids": ids, "condition": {"field": "status", "op": "==", "value": label}}
+            for label, ids in sorted(status_groups.items(), key=lambda kv: len(kv[1]), reverse=True)[:12]
+        ]
+
+        wip = {"Создана", "В работе", "Приостановлена"}
+        wip_groups: dict[str, list[int]] = defaultdict(list)
+        for st in stats:
+            row = st["row"]
+            if str(row.get("status")) in wip:
+                wip_groups[str(row.get("executor_full_name") or "Не назначен")].append(st["task_id"])
+        charts["wip_by_executor"] = [
+            {"label": label, "value": len(ids), "row_ids": ids, "condition": {"field": "executor_full_name", "op": "==", "value": label}}
+            for label, ids in sorted(wip_groups.items(), key=lambda kv: len(kv[1]), reverse=True)[:12]
+        ]
+
+        throughput: dict[str, list[int]] = defaultdict(list)
+        throughput_ranges: dict[str, tuple[date, date]] = {}
+        for st in stats:
+            done = self._parse_iso_date(st["row"].get("date_done"))
+            if not done:
+                continue
+            year, week, _ = done.isocalendar()
+            key = f"{year}-W{week:02d}"
+            throughput[key].append(st["task_id"])
+            throughput_ranges[key] = (date.fromisocalendar(year, week, 1), date.fromisocalendar(year, week, 7))
+        charts["throughput_by_week"] = [
+            {
+                "label": key,
+                "value": len(ids),
+                "row_ids": ids,
+                "condition": {"field": "date_done", "op": "between", "value": f"{throughput_ranges[key][0].isoformat()},{throughput_ranges[key][1].isoformat()}"},
+            }
+            for key, ids in sorted(throughput.items())[-12:]
+        ]
+
+        by_project: dict[str, list[int]] = defaultdict(list)
+        cycle_values: dict[str, list[int]] = defaultdict(list)
+        for st in stats:
+            label = str(st["row"].get("project_name") or f"Проект {st['row'].get('project_id', '')}")
+            by_project[label].append(st["task_id"])
+            cycle_values[label].append(int(st["cycle_days"]))
+        charts["cycle_time_by_project"] = [
+            {
+                "label": label,
+                "value": round(float(median(vals)), 2),
+                "row_ids": by_project[label],
+                "condition": {"field": "project_name", "op": "==", "value": label},
+            }
+            for label, vals in sorted(cycle_values.items(), key=lambda kv: median(kv[1]), reverse=True)[:12]
+        ]
+
+        by_pocket: dict[str, list[int]] = defaultdict(list)
+        lead_values: dict[str, list[int]] = defaultdict(list)
+        for st in stats:
+            label = str(st["row"].get("pocket_name") or f"Карман {st['row'].get('pocket_id', '')}")
+            by_pocket[label].append(st["task_id"])
+            lead_values[label].append(int(st["lead_days"]))
+        charts["lead_time_by_pocket"] = [
+            {
+                "label": label,
+                "value": round(float(median(vals)), 2),
+                "row_ids": by_pocket[label],
+                "condition": {"field": "pocket_name", "op": "==", "value": label},
+            }
+            for label, vals in sorted(lead_values.items(), key=lambda kv: median(kv[1]), reverse=True)[:12]
+        ]
+
+        overdue_ids: list[int] = []
+        for st in stats:
+            deadline = self._parse_iso_date(st["row"].get("date_end"))
+            if deadline and today > deadline and str(st["row"].get("status")) != "Завершена":
+                overdue_ids.append(st["task_id"])
+        charts["overdue_tasks"] = [{"label": "Просроченные", "value": len(overdue_ids), "row_ids": overdue_ids, "condition": {"field": "status", "op": "!=", "value": "Завершена"}}]
+
+        pause_exec: dict[str, list[int]] = defaultdict(list)
+        pause_vals: dict[str, list[float]] = defaultdict(list)
+        for st in stats:
+            label = str(st["row"].get("executor_full_name") or "Не назначен")
+            ratio = (float(st["pause_days"]) / float(st["cycle_days"])) * 100.0
+            pause_exec[label].append(st["task_id"])
+            pause_vals[label].append(ratio)
+        charts["pause_ratio_by_executor"] = [
+            {
+                "label": label,
+                "value": round(sum(vals) / max(1, len(vals)), 2),
+                "row_ids": pause_exec[label],
+                "condition": {"field": "executor_full_name", "op": "==", "value": label},
+            }
+            for label, vals in sorted(pause_vals.items(), key=lambda kv: sum(kv[1]) / max(1, len(kv[1])), reverse=True)[:12]
+        ]
+
+        queue_items: list[dict[str, Any]] = []
+        for st in stats:
+            row = st["row"]
+            if str(row.get("status")) == "Создана" and row.get("executor_user_id") is None:
+                age = max(1, (today - (self._parse_iso_date(row.get("date_created")) or st["start"])).days + 1)
+                queue_items.append({"label": f"#{st['task_id']}", "value": age, "row_ids": [st["task_id"]], "condition": {"field": "id", "op": "==", "value": str(st["task_id"])}})
+        charts["queue_age"] = sorted(queue_items, key=lambda i: i["value"], reverse=True)[:12]
+        return charts
+
+    def _draw_analytics_charts(self, dataset: dict[str, list[dict[str, Any]]]) -> None:
+        self.analytics_chart_dataset = dataset
+        for key, canvas in self.analytics_charts.items():
+            canvas.delete("all")
+            items = dataset.get(key, [])
+            if not items:
+                canvas.create_text(10, 12, anchor="nw", text="Нет данных", fill=self._theme_color("text_muted", "#5F6B6D"))
+                continue
+            width = max(320, int(canvas.winfo_width() or 320))
+            canvas.create_text(8, 8, anchor="nw", text="Срез", fill=self._theme_color("text_muted", "#5F6B6D"))
+            canvas.create_text(width - 8, 8, anchor="ne", text="Значение", fill=self._theme_color("text_muted", "#5F6B6D"))
+            canvas.create_line(8, 24, width - 8, 24, fill=self._theme_color("border", "#D8DDD8"))
+            for idx, item in enumerate(items[:10]):
+                y = 30 + idx * 15
+                tag = f"a_{key}_{idx}"
+                label = f"{idx + 1}. {str(item['label'])[:24]}"
+                value = str(item["value"])
+                canvas.create_text(8, y, anchor="nw", text=label, fill=self._theme_color("text_primary", "#1F2A2A"), tags=(tag,))
+                canvas.create_text(width - 8, y, anchor="ne", text=value, fill=self._theme_color("accent", "#4F6B5A"), tags=(tag,))
+                canvas.create_line(8, y + 13, width - 8, y + 13, fill=self._theme_color("border", "#D8DDD8"))
+                tip = f"{item['label']}: {item['value']} (n={len(item.get('row_ids', []))})"
+                canvas.tag_bind(tag, "<Enter>", lambda e, txt=tip: self._show_widget_tooltip(e, txt))
+                canvas.tag_bind(tag, "<Leave>", self._hide_widget_tooltip)
+                canvas.tag_bind(tag, "<Button-1>", lambda _e, mk=key, bi=idx: self._on_analytics_chart_click(mk, bi))
+
+    def _on_analytics_chart_click(self, metric_key: str, bucket_index: int) -> None:
+        data = getattr(self, "analytics_chart_dataset", {})
+        items = data.get(metric_key, [])
+        if bucket_index < 0 or bucket_index >= len(items):
+            return
+        bucket = items[bucket_index]
+        self.analytics_selected_slice = {
+            "metric_key": metric_key,
+            "label": bucket.get("label", ""),
+            "row_ids": list(bucket.get("row_ids", [])),
+            "condition": bucket.get("condition", {}),
+        }
+        self._apply_analytics_drilldown_to_global_filter(self.analytics_selected_slice["condition"])
+
+    def _apply_analytics_drilldown_to_global_filter(self, condition: dict[str, Any]) -> None:
+        if not condition:
+            return
+        self.global_filter_context.rows = [row for row in self.global_filter_context.rows if row.tag != "analytics_drill"]
+        self.global_filter_context.rows.append(
+            FilterRowState(
+                logic="AND",
+                field=str(condition.get("field", "")),
+                op=str(condition.get("op", "==")),
+                value=str(condition.get("value", "")),
+                tag="analytics_drill",
+            )
+        )
+        self._apply_global_filter_context_to_zone("dashboard")
+        self._apply_global_filter_context_to_zone("kanban")
+        self._apply_global_filter_context_to_zone("timeline")
+        self._apply_global_filter_context_to_zone("analytics")
+        self._refresh_dashboard_top_table_from_filter_context()
+        self._refresh_dashboard_bottom_table_from_selection_and_filter()
+        self._refresh_kanban_board()
+        self._refresh_timeline()
+        self._refresh_analytics()
+        self._refresh_global_filter_indicators()
+
+    def _clear_analytics_drilldown(self) -> None:
+        self.analytics_selected_slice = None
+        self.global_filter_context.rows = [row for row in self.global_filter_context.rows if row.tag != "analytics_drill"]
+        self._apply_global_filter_context_to_zone("dashboard")
+        self._apply_global_filter_context_to_zone("kanban")
+        self._apply_global_filter_context_to_zone("timeline")
+        self._apply_global_filter_context_to_zone("analytics")
+        self._refresh_dashboard_top_table_from_filter_context()
+        self._refresh_dashboard_bottom_table_from_selection_and_filter()
+        self._refresh_kanban_board()
+        self._refresh_timeline()
+        self._refresh_analytics()
+        self._refresh_global_filter_indicators()
+
+    def _refresh_analytics_details(self, rows_subset: list[dict[str, Any]]) -> None:
+        if not self.analytics_details_tree:
+            return
+        self.analytics_details_tree.delete(*self.analytics_details_tree.get_children())
+        for row in rows_subset[:300]:
+            values = (
+                row.get("id", ""),
+                str(row.get("description", ""))[:120],
+                row.get("status", ""),
+                row.get("project_name", ""),
+                row.get("pocket_name", ""),
+                row.get("executor_full_name", ""),
+                row.get("date_created", ""),
+                row.get("date_done", "") or "-",
+            )
+            self.analytics_details_tree.insert("", END, iid=str(row.get("id")), values=values)
+
+    def _on_analytics_details_double_click(self, event: object) -> None:
+        if not self.analytics_details_tree:
+            return
+        row_id = self.analytics_details_tree.identify_row(getattr(event, "y", 0))
+        if not row_id:
+            return
+        task = next((t for t in self.tasks_all if int(t.get("id", 0)) == int(row_id)), None)
+        if task:
+            self._open_task_form(mode="edit", task=task)
+
+    def _refresh_analytics(self) -> None:
+        if "analytics_charts" not in self.__dict__:
+            return
+        rows = self._build_filtered_task_rows()
+        self.analytics_rows_cache = rows
+        dataset = self._compute_analytics_dataset(rows)
+        self._draw_analytics_charts(dataset)
+        details_rows = rows
+        if self.analytics_selected_slice:
+            ids = {int(i) for i in self.analytics_selected_slice.get("row_ids", [])}
+            details_rows = [r for r in rows if int(r.get("id", 0)) in ids]
+            if hasattr(self, "analytics_clear_drill_btn"):
+                self.analytics_clear_drill_btn.state(["!disabled"])
+        else:
+            if hasattr(self, "analytics_clear_drill_btn"):
+                self.analytics_clear_drill_btn.state(["disabled"])
+        self._refresh_analytics_details(details_rows)
+
     def _show_zone(self, name: str) -> None:
         self._hide_widget_tooltip()
         self.current_zone = name
@@ -1178,6 +1750,8 @@ class KanbanTkApp(Tk):
             self._refresh_timeline()
             self._refresh_global_filter_indicators()
         elif name == "analytics":
+            self._apply_global_filter_context_to_zone("analytics")
+            self._refresh_analytics()
             self._refresh_global_filter_indicators()
 
     def _toggle_filter_panel(self) -> None:
@@ -1250,6 +1824,8 @@ class KanbanTkApp(Tk):
                 self.global_filter_context.kanban_visible = visible
             elif zone == "timeline":
                 self.global_filter_context.timeline_visible = visible
+            elif zone == "analytics":
+                self.global_filter_context.analytics_visible = visible
         self._refresh_global_filter_indicators()
 
     def _build_effective_filter_rows(self) -> list[FilterRowState]:
@@ -1359,6 +1935,10 @@ class KanbanTkApp(Tk):
             self._replace_timeline_filter_rows_from_context()
             if "timeline_preset_var" in self.__dict__:
                 self.timeline_preset_var.set(self.global_filter_context.preset_name)
+        elif zone_name == "analytics":
+            self._replace_analytics_filter_rows_from_context()
+            if "analytics_preset_var" in self.__dict__:
+                self.analytics_preset_var.set(self.global_filter_context.preset_name)
 
     def _apply_global_filter_to_zone(self, zone_name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         del zone_name  # reserved for timeline/analytics specific behavior
@@ -1393,6 +1973,8 @@ class KanbanTkApp(Tk):
             clause = f"{field} {op} {value}".strip()
             if cond.tag == "selected":
                 clause = f"{clause} [selected]"
+            elif cond.tag == "analytics_drill":
+                clause = f"{clause} [drill]"
             if idx > 0:
                 clause = f"{cond.logic} {clause}"
             parts.append(clause)
@@ -1456,6 +2038,7 @@ class KanbanTkApp(Tk):
         self._apply_filters()
         self._refresh_kanban_board()
         self._refresh_timeline()
+        self._refresh_analytics()
 
     def _on_session_click(self, _: object) -> None:
         if not self.session_user:
@@ -1488,7 +2071,21 @@ class KanbanTkApp(Tk):
         style = ttk.Style(self)
         bg = style.lookup("TFrame", "background") or "#ffffff"
         w.configure(bg=bg)
+        self._apply_window_icon(w)
         return w
+
+    def _apply_window_icon(self, window: Tk | Toplevel) -> None:
+        icon_file = _app_icon_file()
+        if not os.path.exists(icon_file):
+            return
+        try:
+            window.iconbitmap(icon_file)
+        except Exception:
+            try:
+                self._window_logo_image = PhotoImage(file=icon_file)
+                window.iconphoto(True, self._window_logo_image)
+            except Exception:
+                return
 
     def _can_manage_pockets(self) -> bool:
         if not self.session_user:
@@ -2586,6 +3183,7 @@ class KanbanTkApp(Tk):
         self.global_filter_context.dashboard_visible = False
         self.global_filter_context.kanban_visible = False
         self.global_filter_context.timeline_visible = False
+        self.global_filter_context.analytics_visible = False
         self.selected_project_id = None
         if hasattr(self, "top_tree"):
             self._suppress_top_select_event = True
@@ -2596,13 +3194,17 @@ class KanbanTkApp(Tk):
         self._apply_global_filter_context_to_zone("dashboard")
         self._apply_global_filter_context_to_zone("kanban")
         self._apply_global_filter_context_to_zone("timeline")
+        self._apply_global_filter_context_to_zone("analytics")
         if hasattr(self, "preset_var"):
             self.preset_var.set(DEFAULT_PRESET_NAME)
         if hasattr(self, "kanban_preset_var"):
             self.kanban_preset_var.set(DEFAULT_PRESET_NAME)
+        if hasattr(self, "analytics_preset_var"):
+            self.analytics_preset_var.set(DEFAULT_PRESET_NAME)
         self._refresh_global_filter_indicators()
         self._apply_filters()
         self._refresh_kanban_board()
+        self._refresh_analytics()
 
     def _apply_kanban_filters(self) -> None:
         self._sync_global_filter_context_from_rows(
@@ -2613,16 +3215,21 @@ class KanbanTkApp(Tk):
         )
         self._apply_global_filter_context_to_zone("dashboard")
         self._apply_global_filter_context_to_zone("timeline")
+        self._apply_global_filter_context_to_zone("analytics")
         if hasattr(self, "preset_var"):
             preset_name = self.global_filter_context.preset_name
             self.preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
         if "timeline_preset_var" in self.__dict__:
             preset_name = self.global_filter_context.preset_name
             self.timeline_preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
+        if "analytics_preset_var" in self.__dict__:
+            preset_name = self.global_filter_context.preset_name
+            self.analytics_preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
         self._refresh_dashboard_top_table_from_filter_context()
         self._refresh_dashboard_bottom_table_from_selection_and_filter()
         self._refresh_kanban_board()
         self._refresh_timeline()
+        self._refresh_analytics()
 
     def _refresh_kanban_board(self) -> None:
         if not hasattr(self, "kanban_columns"):
@@ -3467,9 +4074,12 @@ class KanbanTkApp(Tk):
             self.preset_var.set(DEFAULT_PRESET_NAME)
         if hasattr(self, "kanban_preset_var"):
             self.kanban_preset_var.set(DEFAULT_PRESET_NAME)
+        if hasattr(self, "analytics_preset_var"):
+            self.analytics_preset_var.set(DEFAULT_PRESET_NAME)
         self._refresh_global_filter_indicators()
         self._apply_filters()
         self._refresh_kanban_board()
+        self._refresh_analytics()
 
     def _add_filter_row(
         self, field: str = "status", op: str = "==", value: str = "", logic: str = "AND"
@@ -3657,16 +4267,21 @@ class KanbanTkApp(Tk):
             )
             self._apply_global_filter_context_to_zone("kanban")
             self._apply_global_filter_context_to_zone("timeline")
+            self._apply_global_filter_context_to_zone("analytics")
             if hasattr(self, "kanban_preset_var"):
                 preset_name = self.global_filter_context.preset_name
                 self.kanban_preset_var.set(preset_name if preset_name in self.kanban_presets else DEFAULT_PRESET_NAME)
             if "timeline_preset_var" in self.__dict__:
                 preset_name = self.global_filter_context.preset_name
                 self.timeline_preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
+            if "analytics_preset_var" in self.__dict__:
+                preset_name = self.global_filter_context.preset_name
+                self.analytics_preset_var.set(preset_name if preset_name in self.presets else DEFAULT_PRESET_NAME)
             self._refresh_dashboard_top_table_from_filter_context()
             self._refresh_dashboard_bottom_table_from_selection_and_filter()
             self._refresh_kanban_board()
             self._refresh_timeline()
+            self._refresh_analytics()
             self._refresh_global_filter_indicators()
         finally:
             self._in_filter_refresh = False
@@ -3749,10 +4364,13 @@ class KanbanTkApp(Tk):
         )
         self._apply_global_filter_context_to_zone("kanban")
         self._apply_global_filter_context_to_zone("timeline")
+        self._apply_global_filter_context_to_zone("analytics")
         if hasattr(self, "kanban_preset_var"):
             self.kanban_preset_var.set(name if name in self.kanban_presets else DEFAULT_PRESET_NAME)
         if "timeline_preset_var" in self.__dict__:
             self.timeline_preset_var.set(name if name in self.presets else DEFAULT_PRESET_NAME)
+        if "analytics_preset_var" in self.__dict__:
+            self.analytics_preset_var.set(name if name in self.presets else DEFAULT_PRESET_NAME)
 
     def _save_current_preset(self) -> None:
         name = simpledialog.askstring("Сохранить пресет", "Имя пресета:", parent=self)
@@ -3898,8 +4516,159 @@ class KanbanTkApp(Tk):
             self._apply_kanban_preset(DEFAULT_PRESET_NAME)
             self._refresh_kanban_board()
 
+    def _open_user_guide_window(self) -> None:
+        if self.user_guide_window and self.user_guide_window.winfo_exists():
+            self.user_guide_window.lift()
+            self.user_guide_window.focus_force()
+            return
+
+        w = self._create_popup(self)
+        w.title("Руководство пользователя")
+        w.geometry("980x700")
+        self.user_guide_window = w
+        w.protocol("WM_DELETE_WINDOW", self._close_user_guide_window)
+
+        root = ttk.Frame(w, style="Surface.TFrame", padding=(10, 10))
+        root.pack(fill=BOTH, expand=True)
+        notebook = ttk.Notebook(root)
+        notebook.pack(fill=BOTH, expand=True)
+
+        quick_start = (
+            "1. Запустите API и приложение.\n"
+            "2. При старте используется логин ОС для входа в API.\n"
+            "3. Переключайте зоны: Дэшборд, Канбан, Timeline, Аналитика.\n"
+            "4. Базовый фильтр по умолчанию: статус != Завершена.\n\n"
+            "Роли:\n"
+            "- admin, head: полный доступ.\n"
+            "- curator: чтение всей картины + изменения в своем контуре.\n"
+            "- executor: рабочие действия по задачам.\n"
+        )
+        self._add_guide_tab(notebook, "Быстрый старт", quick_start)
+
+        dashboard_text = (
+            "Дэшборд состоит из двух таблиц:\n"
+            "- Верхняя: карман + проект.\n"
+            "- Нижняя: задачи.\n\n"
+            "Логика:\n"
+            "- Выбор проекта в верхней таблице добавляет системное условие project_id == X.\n"
+            "- Условие влияет на все зоны.\n"
+            "- Двойной клик по проекту/задаче открывает форму редактирования.\n"
+        )
+        self._add_guide_tab(notebook, "Дэшборд", dashboard_text)
+
+        kanban_text = (
+            "Колонки Канбан:\n"
+            "- Очередь: Создана и исполнитель не назначен.\n"
+            "- Создана: Создана и исполнитель назначен.\n"
+            "- В работе / Приостановлена / Завершена.\n\n"
+            "Действия:\n"
+            "- Принять (claim): назначает исполнителя и стартует задачу.\n"
+            "- Назначить: назначение без старта.\n"
+            "- Старт, Пауза, Возобновить, Завершить.\n\n"
+            "Двойной клик по карточке открывает задачу.\n"
+        )
+        self._add_guide_tab(notebook, "Канбан", kanban_text)
+
+        timeline_text = (
+            "Timeline = таблица + гантт.\n"
+            "- Вертикальный скролл синхронный.\n"
+            "- Горизонтальный скролл только у гантта.\n"
+            "- Период (Начало/Окончание) применяется только к Timeline.\n"
+            "- В таблице описание сокращается до 40 символов, полный текст по наведению.\n"
+            "- Разделитель между таблицей и ганттом можно двигать.\n"
+        )
+        self._add_guide_tab(notebook, "Timeline", timeline_text)
+
+        analytics_text = (
+            "Аналитика использует тот же глобальный фильтр.\n"
+            "Показатели:\n"
+            "- Распределение по статусам\n"
+            "- WIP по исполнителям\n"
+            "- Пропускная способность по неделям\n"
+            "- Cycle time по проектам\n"
+            "- Lead time по карманам\n"
+            "- Просроченные задачи\n"
+            "- Доля пауз по исполнителям\n"
+            "- Возраст очереди\n\n"
+            "Клик по строке показателя включает детализацию и обновляет все зоны.\n"
+            "Кнопка «Снять детализацию» убирает drill-down слой.\n"
+        )
+        self._add_guide_tab(notebook, "Аналитика", analytics_text)
+
+        refs_text = (
+            "Справочники:\n"
+            "- Карманы, Проекты, Задачи, Пользователи, Статусы.\n"
+            "- Открываются в popup-окнах.\n"
+            "- В таблицах доступен двойной клик для редактирования.\n\n"
+            "Настройки БД:\n"
+            "- Настройки -> База данных.\n"
+            "- sqlite / postgres-greenplum (заглушка).\n\n"
+            "Экспорт:\n"
+            "- CSV резерв исходных данных.\n"
+            "- Excel: одна строка = одна задача.\n"
+        )
+        self._add_guide_tab(notebook, "Справочники и сервис", refs_text)
+
+        footer = ttk.Frame(root)
+        footer.pack(fill="x", pady=(8, 0))
+        self._mk_button(footer, "Закрыть", self._close_user_guide_window).pack(side=RIGHT)
+
+    def _add_guide_tab(self, notebook: ttk.Notebook, title: str, content: str) -> None:
+        tab = ttk.Frame(notebook, style="Surface.TFrame")
+        notebook.add(tab, text=title)
+        tab.grid_rowconfigure(0, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+
+        holder = ttk.Frame(tab, style="Surface.TFrame")
+        holder.grid(row=0, column=0, sticky="nsew")
+        canvas = Canvas(holder, highlightthickness=0, bd=0, bg=self._theme_color("surface_panel", "#FFFFFF"))
+        yscroll = ttk.Scrollbar(holder, orient=VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=yscroll.set)
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        yscroll.pack(side=RIGHT, fill="y")
+
+        inner = ttk.Frame(canvas, style="Surface.TFrame", padding=(14, 14))
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _e, c=canvas: c.configure(scrollregion=c.bbox("all")))
+        canvas.bind("<Configure>", lambda e, c=canvas, wid=window_id: c.itemconfigure(wid, width=max(1, int(getattr(e, "width", 1)))))
+        ttk.Label(inner, text=content, style="Surface.TLabel", justify=LEFT).pack(fill=BOTH, expand=True)
+
+    def _close_user_guide_window(self) -> None:
+        if self.user_guide_window and self.user_guide_window.winfo_exists():
+            self.user_guide_window.destroy()
+        self.user_guide_window = None
+
     def _show_about(self) -> None:
-        messagebox.showinfo("О программе", "Project Kanban Tkinter UI (MVP)")
+        w = self._create_popup(self)
+        w.title("О программе")
+        w.geometry("520x320")
+        body = ttk.Frame(w, style="Surface.TFrame", padding=(16, 16))
+        body.pack(fill=BOTH, expand=True)
+
+        logo_path = _app_logo_file()
+        if os.path.exists(logo_path):
+            try:
+                if Image is not None and ImageTk is not None:
+                    img = Image.open(logo_path)
+                    img.thumbnail((170, 110))
+                    self._about_logo_image = ImageTk.PhotoImage(img)
+                else:
+                    raw = PhotoImage(file=logo_path)
+                    subsample = max(1, int(max(raw.width() / 170, raw.height() / 110)))
+                    self._about_logo_image = raw.subsample(subsample, subsample)
+                ttk.Label(body, image=self._about_logo_image, style="Surface.TLabel").pack(pady=(0, 12))
+            except Exception:
+                self._about_logo_image = None
+
+        text = (
+            "PocketFlow\n"
+            "Desktop workflow manager (Tkinter MVP)\n\n"
+            "Зоны: Дэшборд, Канбан, Timeline, Аналитика\n"
+            "Справочники: Карманы, Проекты, Задачи, Пользователи, Статусы\n"
+            "Экспорт: CSV резерв и Excel по задачам"
+        )
+        ttk.Label(body, text=text, justify=LEFT, style="Surface.TLabel").pack(fill=BOTH, expand=True)
+        self._mk_button(body, "Закрыть", w.destroy).pack(anchor="e", pady=(10, 0))
 
     def _show_theme_info(self) -> None:
         theme_file = _theme_file(self.theme_name)
@@ -4128,6 +4897,8 @@ class KanbanTkApp(Tk):
         self._close_tasks_window()
         self._close_users_window()
         self._close_statuses_window()
+        self._close_db_settings_window()
+        self._close_user_guide_window()
         for child in self.winfo_children():
             child.destroy()
         self.session_user = None
@@ -4156,6 +4927,279 @@ class KanbanTkApp(Tk):
         data["theme"] = theme_name
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _load_db_settings(self) -> dict[str, str]:
+        path = _ui_config_file()
+        default_path = os.path.abspath("kanban.db")
+        settings = {
+            "db_type": "sqlite",
+            "db_value": default_path,
+        }
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    db_type = str(loaded.get("db_type", settings["db_type"])).strip().lower()
+                    db_value = str(loaded.get("db_value", settings["db_value"])).strip()
+                    if db_type not in {"sqlite", "postgres/greenplum"}:
+                        db_type = "sqlite"
+                    settings["db_type"] = db_type
+                    settings["db_value"] = db_value or settings["db_value"]
+            except Exception:
+                pass
+        return settings
+
+    def _save_db_settings(self, db_type: str, db_value: str) -> None:
+        path = _ui_config_file()
+        data: dict[str, Any] = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception:
+                data = {}
+        data["db_type"] = db_type
+        data["db_value"] = db_value
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _open_db_settings_window(self) -> None:
+        if self.db_settings_window and self.db_settings_window.winfo_exists():
+            self.db_settings_window.lift()
+            self.db_settings_window.focus_force()
+            return
+
+        w = self._create_popup(self)
+        w.title("Настройки БД")
+        w.geometry("620x230")
+        self.db_settings_window = w
+        w.protocol("WM_DELETE_WINDOW", lambda: self._close_db_settings_window())
+
+        body = ttk.Frame(w, style="Surface.TFrame", padding=(14, 14))
+        body.pack(fill=BOTH, expand=True)
+        body.grid_columnconfigure(1, weight=1)
+
+        db_type_var = StringVar(value=self.db_settings.get("db_type", "sqlite"))
+        db_value_var = StringVar(value=self.db_settings.get("db_value", os.path.abspath("kanban.db")))
+        field_label_var = StringVar(value="Путь к файлу SQLite")
+        hint_var = StringVar(value="")
+
+        ttk.Label(body, text="Тип БД:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=6)
+        db_type_combo = ttk.Combobox(
+            body,
+            textvariable=db_type_var,
+            values=["sqlite", "postgres/greenplum"],
+            state="readonly",
+            width=26,
+        )
+        db_type_combo.grid(row=0, column=1, sticky="w", pady=6)
+
+        ttk.Label(body, textvariable=field_label_var).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=6)
+        value_entry = ttk.Entry(body, textvariable=db_value_var)
+        value_entry.grid(row=1, column=1, sticky="ew", pady=6)
+
+        hint = ttk.Label(body, textvariable=hint_var, style="Surface.TLabel")
+        hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 10))
+
+        def refresh_db_form(*_args: Any) -> None:
+            selected = db_type_var.get().strip().lower()
+            if selected == "sqlite":
+                field_label_var.set("Путь к файлу SQLite")
+                hint_var.set("Укажите путь к .db файлу. Пример: D:\\data\\kanban.db")
+                value_entry.state(["!disabled"])
+            else:
+                field_label_var.set("Конфигурация подключения")
+                hint_var.set("Postgres/Greenplum: заглушка, подключение пока не реализовано.")
+                value_entry.state(["!disabled"])
+
+        db_type_combo.bind("<<ComboboxSelected>>", refresh_db_form)
+        refresh_db_form()
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+        def save_db_settings() -> None:
+            selected = db_type_var.get().strip().lower()
+            value = db_value_var.get().strip()
+            if selected == "sqlite":
+                if not value:
+                    messagebox.showwarning("Настройки БД", "Укажите путь к файлу SQLite.", parent=w)
+                    return
+                value = os.path.abspath(value)
+                db_value_var.set(value)
+                self.db_settings = {"db_type": selected, "db_value": value}
+                self._save_db_settings(selected, value)
+                os.environ["KANBAN_DB_PATH"] = value
+                messagebox.showinfo("Настройки БД", "Параметры SQLite сохранены.", parent=w)
+                return
+            self.db_settings = {"db_type": selected, "db_value": value}
+            self._save_db_settings(selected, value)
+            messagebox.showinfo("Настройки БД", "Режим Postgres/Greenplum сохранен как заглушка.", parent=w)
+
+        self._mk_button(buttons, "Сохранить", save_db_settings).pack(side=LEFT, padx=6)
+        self._mk_button(buttons, "Закрыть", self._close_db_settings_window).pack(side=LEFT, padx=6)
+
+    def _close_db_settings_window(self) -> None:
+        if self.db_settings_window and self.db_settings_window.winfo_exists():
+            self.db_settings_window.destroy()
+        self.db_settings_window = None
+
+    def _open_export_window(self) -> None:
+        w = self._create_popup(self)
+        w.title("Экспорт данных")
+        w.geometry("760x260")
+
+        body = ttk.Frame(w, style="Surface.TFrame", padding=(14, 14))
+        body.pack(fill=BOTH, expand=True)
+        body.grid_columnconfigure(1, weight=1)
+
+        backup_dir_var = StringVar(value=str(Path.cwd() / "exports"))
+        xlsx_path_var = StringVar(value=str(Path.cwd() / "exports" / f"tasks_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"))
+
+        ttk.Label(body, text="CSV резерв (папка):").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=6)
+        ttk.Entry(body, textvariable=backup_dir_var).grid(row=0, column=1, sticky="ew", pady=6)
+        self._mk_button(body, "...", lambda: self._pick_export_dir(backup_dir_var), width=4).grid(row=0, column=2, padx=(6, 0), pady=6)
+
+        ttk.Label(body, text="Excel файл (.xlsx):").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=6)
+        ttk.Entry(body, textvariable=xlsx_path_var).grid(row=1, column=1, sticky="ew", pady=6)
+        self._mk_button(body, "...", lambda: self._pick_export_xlsx(xlsx_path_var), width=4).grid(row=1, column=2, padx=(6, 0), pady=6)
+
+        note = (
+            "1) CSV резерв: исходные данные таблиц API (users/pockets/projects/tasks/task_pauses/statuses).\n"
+            "2) Excel: одна строка = одна задача, с основными бизнес-сущностями."
+        )
+        ttk.Label(body, text=note, style="Surface.TLabel", justify=LEFT).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 10))
+
+        actions = ttk.Frame(body)
+        actions.grid(row=3, column=0, columnspan=3, sticky="e")
+        self._mk_button(actions, "Экспорт CSV", lambda: self._export_raw_csv_backup(backup_dir_var.get().strip(), parent=w)).pack(side=LEFT, padx=4)
+        self._mk_button(actions, "Экспорт Excel", lambda: self._export_tasks_xlsx(xlsx_path_var.get().strip(), parent=w)).pack(side=LEFT, padx=4)
+        self._mk_button(actions, "Закрыть", w.destroy).pack(side=LEFT, padx=4)
+
+    def _pick_export_dir(self, var: StringVar) -> None:
+        selected = filedialog.askdirectory(title="Папка для CSV резерва")
+        if selected:
+            var.set(selected)
+
+    def _pick_export_xlsx(self, var: StringVar) -> None:
+        selected = filedialog.asksaveasfilename(
+            title="Файл Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("All files", "*.*")],
+        )
+        if selected:
+            var.set(selected)
+
+    def _export_raw_csv_backup(self, base_dir: str, *, parent: Toplevel | Tk) -> None:
+        if not base_dir:
+            messagebox.showwarning("Экспорт", "Укажите папку для резервной CSV копии.", parent=parent)
+            return
+        try:
+            export_root = Path(base_dir).expanduser().resolve()
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            target = export_root / f"raw_backup_{stamp}"
+            target.mkdir(parents=True, exist_ok=True)
+
+            data_map: dict[str, list[dict[str, Any]]] = {
+                "users": self.api.list_users(),
+                "pockets": self.api.list_pockets(),
+                "projects": self.api.list_projects(),
+                "tasks": self.api.list_tasks(),
+                "task_pauses": self.api.list_task_pauses(),
+                "statuses": self.api.list_statuses(entity_type=None, is_active=None),
+            }
+            for table_name, rows in data_map.items():
+                self._write_rows_csv(target / f"{table_name}.csv", rows)
+        except ApiClientError as exc:
+            messagebox.showerror("Экспорт", f"Ошибка API при выгрузке CSV.\n{exc}", parent=parent)
+            return
+        except Exception as exc:
+            messagebox.showerror("Экспорт", f"Не удалось сохранить CSV резерв.\n{exc}", parent=parent)
+            return
+        messagebox.showinfo("Экспорт", f"CSV резерв сохранен:\n{target}", parent=parent)
+
+    def _write_rows_csv(self, path: Path, rows: list[dict[str, Any]]) -> None:
+        keys: list[str] = []
+        for row in rows:
+            for key in row.keys():
+                if key not in keys:
+                    keys.append(str(key))
+        if not keys:
+            keys = ["empty"]
+            rows = [{"empty": ""}]
+        with path.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in keys})
+
+    def _export_tasks_xlsx(self, file_path: str, *, parent: Toplevel | Tk) -> None:
+        if Workbook is None:
+            messagebox.showerror("Экспорт", "Модуль openpyxl не установлен. Добавьте зависимость для экспорта в XLSX.", parent=parent)
+            return
+        if not file_path:
+            messagebox.showwarning("Экспорт", "Укажите путь к файлу Excel.", parent=parent)
+            return
+        try:
+            if self.session_user is None or not self.tasks_all:
+                self._load_dashboard_data()
+            rows = [self._build_task_view(task) for task in self.tasks_all]
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Задачи"
+
+            headers = [
+                ("task_id", "ID задачи"),
+                ("description", "Описание"),
+                ("status", "Статус"),
+                ("date_created", "Создана"),
+                ("date_start_work", "Старт работы"),
+                ("date_done", "Завершена"),
+                ("executor_user_id", "ID исполнителя"),
+                ("executor_full_name", "Исполнитель"),
+                ("customer", "Заказчик"),
+                ("code_link", "Код/ссылка"),
+                ("project_id", "ID проекта"),
+                ("project_name", "Проект"),
+                ("project_code", "Код проекта"),
+                ("pocket_id", "ID кармана"),
+                ("pocket_name", "Карман"),
+            ]
+            ws.append([h[1] for h in headers])
+            for row in rows:
+                project = self.projects_by_id.get(int(row.get("project_id") or 0), {})
+                ws.append(
+                    [
+                        row.get("id", ""),
+                        row.get("description", ""),
+                        row.get("status", ""),
+                        row.get("date_created", ""),
+                        row.get("date_start_work", ""),
+                        row.get("date_done", ""),
+                        row.get("executor_user_id", ""),
+                        row.get("executor_full_name", ""),
+                        row.get("customer", ""),
+                        row.get("code_link", ""),
+                        row.get("project_id", ""),
+                        row.get("project_name", ""),
+                        project.get("project_code", ""),
+                        row.get("pocket_id", ""),
+                        row.get("pocket_name", ""),
+                    ]
+                )
+            target = Path(file_path).expanduser().resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            wb.save(str(target))
+        except ApiClientError as exc:
+            messagebox.showerror("Экспорт", f"Ошибка API при выгрузке Excel.\n{exc}", parent=parent)
+            return
+        except Exception as exc:
+            messagebox.showerror("Экспорт", f"Не удалось сохранить Excel файл.\n{exc}", parent=parent)
+            return
+        messagebox.showinfo("Экспорт", f"Excel файл сохранен:\n{target}", parent=parent)
 
     def _load_theme_tokens(self, theme_name: str) -> dict[str, Any]:
         path = _theme_file(theme_name)
@@ -4227,6 +5271,10 @@ class KanbanTkApp(Tk):
             canvas.configure(bg=self._theme_color("surface_bg", "#F7F8F5"))
         if hasattr(self, "timeline_canvas") and self.timeline_canvas:
             self.timeline_canvas.configure(bg=self._theme_color("surface_panel", "#FFFFFF"))
+        if hasattr(self, "analytics_content_canvas") and self.analytics_content_canvas:
+            self.analytics_content_canvas.configure(bg=self._theme_color("surface_bg", "#F7F8F5"))
+        for canvas in getattr(self, "analytics_charts", {}).values():
+            canvas.configure(bg=self._theme_color("surface_panel", "#FFFFFF"))
         self._load_kanban_icons(self.theme_name)
 
     def _setup_forest_theme(self) -> None:

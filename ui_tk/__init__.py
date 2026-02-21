@@ -1,2 +1,1 @@
-"""Tkinter UI package for Project Kanban."""
-
+"""Tkinter UI package for PocketFlow."""

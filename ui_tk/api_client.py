@@ -1,4 +1,4 @@
-"""HTTP client for the local Project Kanban FastAPI backend."""
+"""HTTP client for the local PocketFlow FastAPI backend."""
 from __future__ import annotations
 
 import json
@@ -125,6 +125,9 @@ class ApiClient:
     def list_tasks(self) -> list[dict[str, Any]]:
         return self._request("/tasks")
 
+    def list_task_pauses(self, task_id: int | None = None) -> list[dict[str, Any]]:
+        return self._request("/task_pauses", query={"task_id": task_id})
+
     def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("/tasks", method="POST", payload=payload)
 
@@ -133,3 +136,13 @@ class ApiClient:
 
     def task_action(self, task_id: int, action: str, comment: str | None = None) -> dict[str, Any]:
         return self._request(f"/tasks/{task_id}/{action}", method="POST", payload={"comment": comment})
+
+    def claim_task(self, task_id: int, comment: str | None = None) -> dict[str, Any]:
+        return self._request(f"/tasks/{task_id}/claim", method="POST", payload={"comment": comment})
+
+    def assign_task(self, task_id: int, executor_user_id: int, comment: str | None = None) -> dict[str, Any]:
+        return self._request(
+            f"/tasks/{task_id}/assign",
+            method="POST",
+            payload={"executor_user_id": int(executor_user_id), "comment": comment},
+        )
