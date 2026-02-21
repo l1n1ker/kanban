@@ -3,14 +3,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from tests.helpers.statuses import status_id as _status_id
 
-def _status_id(conn: sqlite3.Connection, *, entity_type: str, name: str) -> int:
-    row = conn.execute(
-        "SELECT id FROM statuses WHERE entity_type = ? AND name = ? LIMIT 1",
-        (entity_type, name),
-    ).fetchone()
-    assert row is not None
-    return int(row["id"])
 
 
 def _insert_user(conn: sqlite3.Connection, *, user_id: int, login: str, role: str) -> None:

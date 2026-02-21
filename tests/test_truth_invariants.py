@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from tests.helpers.statuses import status_id as _status_id
+
 
 def _insert_user(conn: sqlite3.Connection, *, user_id: int, login: str, role: str) -> None:
     conn.execute(
@@ -29,15 +31,6 @@ def _setup_context(conn: sqlite3.Connection) -> None:
         (200, "Project A", 100, _status_id(conn, entity_type="project", name="Активен"), "2026-02-01", None, 10, 10),
     )
     conn.commit()
-
-
-def _status_id(conn: sqlite3.Connection, *, entity_type: str, name: str) -> int:
-    row = conn.execute(
-        "SELECT id FROM statuses WHERE entity_type = ? AND name = ? LIMIT 1",
-        (entity_type, name),
-    ).fetchone()
-    assert row is not None
-    return int(row["id"])
 
 
 def test_task_status_and_status_id_are_consistent_on_transition(client, db_conn: sqlite3.Connection) -> None:

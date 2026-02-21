@@ -3,30 +3,8 @@ from __future__ import annotations
 
 import sqlite3
 
-
-def _insert_user(conn: sqlite3.Connection, *, user_id: int, login: str, role: str) -> None:
-    conn.execute(
-        "INSERT INTO users (id, login, full_name, role, is_active, status_id) VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            user_id,
-            login,
-            f"{login} name",
-            role,
-            1,
-            conn.execute(
-                "SELECT id FROM statuses WHERE entity_type = 'user' AND name = 'Активен' LIMIT 1"
-            ).fetchone()["id"],
-        ),
-    )
-
-
-def _status_id(conn: sqlite3.Connection, *, entity_type: str, name: str) -> int:
-    row = conn.execute(
-        "SELECT id FROM statuses WHERE entity_type = ? AND name = ? LIMIT 1",
-        (entity_type, name),
-    ).fetchone()
-    assert row is not None
-    return int(row["id"])
+from tests.helpers.factories import insert_user as _insert_user
+from tests.helpers.statuses import status_id as _status_id
 
 
 def test_create_pocket_accepts_compat_status_input(client, db_conn: sqlite3.Connection) -> None:
