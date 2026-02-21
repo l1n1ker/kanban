@@ -121,7 +121,6 @@ PROJECT_FILTER_FIELDS = {
     "owner_it",
 }
 KANBAN_ACTION_ICONS = {
-    "claim": "claim",
     "assign": "assign",
     "start": "start",
     "pause": "pause",
@@ -2091,7 +2090,7 @@ class KanbanTkApp(Tk):
         if not self.session_user:
             return False
         role = str(self.session_user.get("role", "executor"))
-        return role in {"admin", "head", "curator"}
+        return role in {"admin", "head", "teamlead", "curator"}
 
     def _can_create_pockets(self) -> bool:
         if not self.session_user:
@@ -3308,8 +3307,6 @@ class KanbanTkApp(Tk):
         task_id = int(task["id"])
         if queue and self.session_user is not None:
             role = str(self.session_user.get("role", "executor"))
-            if role in {"executor", "curator", "teamlead", "head", "admin"}:
-                self._add_kanban_action_button(actions, "claim", "Принять задачу", lambda tid=task_id: self._kanban_claim_task(tid))
             if role in {"curator", "teamlead", "head", "admin"}:
                 self._add_kanban_action_button(
                     actions,
@@ -3357,7 +3354,6 @@ class KanbanTkApp(Tk):
             icon_image = self.icon_images.get(action_key)
         if icon_image is None:
             fallback_text = {
-                "claim": "C",
                 "assign": "A",
                 "start": "S",
                 "pause": "P",
@@ -4562,7 +4558,6 @@ class KanbanTkApp(Tk):
             "- Создана: Создана и исполнитель назначен.\n"
             "- В работе / Приостановлена / Завершена.\n\n"
             "Действия:\n"
-            "- Принять (claim): назначает исполнителя и стартует задачу.\n"
             "- Назначить: назначение без старта.\n"
             "- Старт, Пауза, Возобновить, Завершить.\n\n"
             "Двойной клик по карточке открывает задачу.\n"

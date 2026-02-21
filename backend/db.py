@@ -169,6 +169,76 @@ def _migrate_statuses_model(conn: sqlite3.Connection) -> None:
     )
 
 
+def _sync_status_columns(conn: sqlite3.Connection) -> None:
+    # Keep legacy text status columns consistent with canonical status_id during compatibility period.
+    conn.execute(
+        """
+        UPDATE pockets
+        SET status = (
+            SELECT s.name FROM statuses s
+            WHERE s.id = pockets.status_id AND s.entity_type = 'pocket'
+            LIMIT 1
+        )
+        WHERE status_id IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        UPDATE projects
+        SET status = (
+            SELECT s.name FROM statuses s
+            WHERE s.id = projects.status_id AND s.entity_type = 'project'
+            LIMIT 1
+        )
+        WHERE status_id IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = (
+            SELECT s.name FROM statuses s
+            WHERE s.id = tasks.status_id AND s.entity_type = 'task'
+            LIMIT 1
+        )
+        WHERE status_id IS NOT NULL
+        """
+    )
+    # Mirror user status to boolean activity flag while both fields are present.
+    conn.execute(
+        """
+        UPDATE users
+        SET is_active = CASE
+            WHEN status_id = (SELECT id FROM statuses WHERE entity_type = 'user' AND name = 'Активен' LIMIT 1) THEN 1
+            ELSE 0
+        END
+        WHERE status_id IS NOT NULL
+        """
+    )
+
+
+def _validate_status_model(conn: sqlite3.Connection) -> None:
+    required = (
+        ("pocket", "Запущен"),
+        ("pocket", "Завершён"),
+        ("project", "Активен"),
+        ("project", "Завершён"),
+        ("task", "Создана"),
+        ("task", "В работе"),
+        ("task", "Приостановлена"),
+        ("task", "Завершена"),
+        ("user", "Активен"),
+        ("user", "Неактивен"),
+    )
+    for entity_type, name in required:
+        row = conn.execute(
+            "SELECT id FROM statuses WHERE entity_type = ? AND name = ? LIMIT 1",
+            (entity_type, name),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Missing required status '{name}' for entity_type '{entity_type}'")
+
+
 
 def init_db() -> None:
     conn = get_connection()
@@ -287,5 +357,7 @@ def init_db() -> None:
     _migrate_projects_add_project_code(conn)
     _seed_reference_data(conn)
     _migrate_statuses_model(conn)
+    _sync_status_columns(conn)
+    _validate_status_model(conn)
     conn.commit()
     conn.close()

@@ -1,6 +1,8 @@
 """FastAPI application for PocketFlow."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from backend.db import init_db
@@ -14,12 +16,14 @@ from backend.http.routes_tasks import router as tasks_router
 from backend.http.routes_users import router as users_router
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="PocketFlow API")
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    init_db()
+    yield
 
-    @app.on_event("startup")
-    def _init_db() -> None:
-        init_db()
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="PocketFlow API", lifespan=_lifespan)
 
     @app.get("/")
     def root() -> dict[str, str]:

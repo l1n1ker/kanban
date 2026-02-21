@@ -1,7 +1,7 @@
 """Action log helpers."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Mapping
 import sqlite3
 
@@ -35,7 +35,7 @@ def log_action(
     new_value: str | None,
     comment: str | None = None,
 ) -> None:
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
         """
         INSERT INTO action_log (timestamp, user_id, entity_type, entity_id, action_type, old_value, new_value, comment)

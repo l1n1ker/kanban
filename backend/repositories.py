@@ -80,8 +80,10 @@ class PocketsRepo:
         row = self.conn.execute("SELECT * FROM pockets WHERE id = ?", (pocket_id,)).fetchone()
         return row_to_dict(row) if row else {}
 
-    def list(self, *, status: str | None = None) -> list[dict[str, Any]]:
-        if status:
+    def list(self, *, status: str | None = None, status_id: int | None = None) -> list[dict[str, Any]]:
+        if status_id is not None:
+            rows = self.conn.execute("SELECT * FROM pockets WHERE status_id = ?", (status_id,)).fetchall()
+        elif status:
             rows = self.conn.execute("SELECT * FROM pockets WHERE status = ?", (status,)).fetchall()
         else:
             rows = self.conn.execute("SELECT * FROM pockets").fetchall()
@@ -129,14 +131,23 @@ class ProjectsRepo:
         row = self.conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return row_to_dict(row) if row else {}
 
-    def list(self, *, pocket_id: int | None = None, status: str | None = None) -> list[dict[str, Any]]:
+    def list(
+        self,
+        *,
+        pocket_id: int | None = None,
+        status: str | None = None,
+        status_id: int | None = None,
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM projects"
         params: list[Any] = []
         conditions = []
         if pocket_id is not None:
             conditions.append("pocket_id = ?")
             params.append(pocket_id)
-        if status:
+        if status_id is not None:
+            conditions.append("status_id = ?")
+            params.append(status_id)
+        elif status:
             conditions.append("status = ?")
             params.append(status)
         if conditions:
@@ -187,14 +198,24 @@ class TasksRepo:
         row = self.conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return row_to_dict(row) if row else {}
 
-    def list(self, *, project_id: int | None = None, status: str | None = None, executor_user_id: int | None = None) -> list[dict[str, Any]]:
+    def list(
+        self,
+        *,
+        project_id: int | None = None,
+        status: str | None = None,
+        status_id: int | None = None,
+        executor_user_id: int | None = None,
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM tasks"
         params: list[Any] = []
         conditions = []
         if project_id is not None:
             conditions.append("project_id = ?")
             params.append(project_id)
-        if status:
+        if status_id is not None:
+            conditions.append("status_id = ?")
+            params.append(status_id)
+        elif status:
             conditions.append("status = ?")
             params.append(status)
         if executor_user_id is not None:

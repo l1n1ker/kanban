@@ -176,6 +176,11 @@ class TaskStatusAction(BaseModel):
     comment: Optional[str] = None
 
 
+class TaskAssignIn(BaseModel):
+    executor_user_id: int
+    comment: Optional[str] = None
+
+
 class StatusCreate(BaseModel):
     entity_type: Literal["pocket", "project", "task", "user"]
     code: str

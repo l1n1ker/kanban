@@ -4,6 +4,10 @@ from __future__ import annotations
 import sqlite3
 
 
+STATUS_RUNNING = "Запущен"
+STATUS_DONE = "Завершён"
+
+
 def _insert_user(conn: sqlite3.Connection, *, user_id: int, login: str, role: str) -> None:
     conn.execute(
         "INSERT INTO users (id, login, full_name, role, is_active) VALUES (?, ?, ?, ?, ?)",
@@ -17,7 +21,7 @@ def _insert_pocket(conn: sqlite3.Connection, *, pocket_id: int, owner_user_id: i
         INSERT INTO pockets (id, name, date_start, date_end, status, owner_user_id, department)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (pocket_id, "Pocket X", "2026-02-01", None, "Запущен", owner_user_id, "IT"),
+        (pocket_id, "Pocket X", "2026-02-01", None, STATUS_RUNNING, owner_user_id, "IT"),
     )
 
 
@@ -28,12 +32,33 @@ def test_head_can_archive_pocket(client, db_conn: sqlite3.Connection) -> None:
 
     response = client.patch(
         "/pockets/700",
-        json={"status": "Завершён"},
+        json={"status": STATUS_DONE},
         headers={"X-User-Id": "31", "X-User-Role": "head"},
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "Завершён"
+    assert response.json()["status"] == STATUS_DONE
+
+
+def test_curator_can_create_pocket(client, db_conn: sqlite3.Connection) -> None:
+    _insert_user(db_conn, user_id=35, login="cur1", role="curator")
+    db_conn.commit()
+
+    response = client.post(
+        "/pockets",
+        json={
+            "name": "Curator Pocket",
+            "date_start": "2026-02-01",
+            "date_end": None,
+            "status": STATUS_RUNNING,
+            "owner_user_id": 35,
+            "department": "IT",
+        },
+        headers={"X-User-Id": "35", "X-User-Role": "curator"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["name"] == "Curator Pocket"
 
 
 def test_executor_cannot_create_or_update_pocket(client, db_conn: sqlite3.Connection) -> None:
@@ -48,7 +73,7 @@ def test_executor_cannot_create_or_update_pocket(client, db_conn: sqlite3.Connec
             "name": "New Pocket",
             "date_start": "2026-02-01",
             "date_end": None,
-            "status": "Запущен",
+            "status": STATUS_RUNNING,
             "owner_user_id": 33,
             "department": "IT",
         },
@@ -74,7 +99,7 @@ def test_pocket_date_validation(client, db_conn: sqlite3.Connection) -> None:
             "name": "Bad Dates",
             "date_start": "2026-03-10",
             "date_end": "2026-03-01",
-            "status": "Запущен",
+            "status": STATUS_RUNNING,
             "owner_user_id": 34,
             "department": "IT",
         },

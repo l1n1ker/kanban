@@ -27,16 +27,16 @@ class Permission:
 
 USER_PERMISSIONS = {
     "users.create": "admin",
-    "users.read": "head",
+    "users.read": "executor",
     "users.update": "admin",
     "users.delete": "admin",
-    "users.list": "head",
+    "users.list": "executor",
 }
 
 ENTITY_PERMISSIONS = {
-    "pockets.create": "head",  # admin/head
-    "pockets.update": "head",
-    "pockets.delete": "head",
+    "pockets.create": "curator",
+    "pockets.update": "curator",
+    "pockets.delete": "curator",
     "pockets.read": "executor",
     "pockets.list": "executor",
     "projects.create": "curator",
@@ -46,6 +46,7 @@ ENTITY_PERMISSIONS = {
     "projects.list": "executor",
     "tasks.create": "curator",
     "tasks.update": "curator",
+    "tasks.claim": "curator",
     "tasks.delete": "curator",
     "tasks.read": "executor",
     "tasks.list": "executor",

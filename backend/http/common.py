@@ -82,7 +82,14 @@ def handle_service_exception(exc: Exception) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     if isinstance(exc, ValueError):
         message = str(exc)
-        if "transition" in message or "active pause" in message:
+        if (
+            "transition" in message
+            or "active pause" in message
+            or "already assigned" in message
+            or "cannot claim" in message
+            or "Cannot start" in message
+            or "assign allowed" in message
+        ):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=message)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message)
     if isinstance(exc, sqlite3.IntegrityError):

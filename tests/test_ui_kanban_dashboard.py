@@ -104,7 +104,7 @@ def test_dashboard_filter_rebuilds_top_then_bottom_once() -> None:
 def test_kanban_png_loader_loads_theme_set() -> None:
     app = _new_app()
     paths = app._resolve_kanban_icon_paths("forest-light")
-    assert set(paths.keys()) == {"claim", "assign", "start", "pause", "resume", "complete"}
+    assert set(paths.keys()) == {"assign", "start", "pause", "resume", "complete"}
     for path in paths.values():
         assert Path(path).exists()
 
@@ -261,6 +261,12 @@ def test_timeline_truncate_description_40_chars() -> None:
     result = app._truncate_timeline_text(src, 40)
     assert len(result) == 40
     assert result.endswith("...")
+
+
+def test_teamlead_can_manage_pockets_gate() -> None:
+    app = _new_app()
+    app.session_user = {"id": 7, "role": "teamlead"}
+    assert app._can_manage_pockets() is True
 
 
 def test_timeline_full_text_cache_by_task_id() -> None:
