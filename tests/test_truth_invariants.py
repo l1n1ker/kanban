@@ -16,17 +16,17 @@ def _setup_context(conn: sqlite3.Connection) -> None:
     _insert_user(conn, user_id=11, login="executor", role="executor")
     conn.execute(
         """
-        INSERT INTO pockets (id, name, date_start, date_end, status, owner_user_id, department)
+        INSERT INTO pockets (id, name, date_start, date_end, status_id, owner_user_id, department)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (100, "Pocket A", "2026-02-01", None, "Запущен", 10, "IT"),
+        (100, "Pocket A", "2026-02-01", None, _status_id(conn, entity_type="pocket", name="Запущен"), 10, "IT"),
     )
     conn.execute(
         """
-        INSERT INTO projects (id, name, pocket_id, status, date_start, date_end, curator_business_user_id, curator_it_user_id)
+        INSERT INTO projects (id, name, pocket_id, status_id, date_start, date_end, curator_business_user_id, curator_it_user_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (200, "Project A", 100, "Активен", "2026-02-01", None, 10, 10),
+        (200, "Project A", 100, _status_id(conn, entity_type="project", name="Активен"), "2026-02-01", None, 10, 10),
     )
     conn.commit()
 

@@ -4,6 +4,15 @@ from __future__ import annotations
 import sqlite3
 
 
+def _status_id(conn: sqlite3.Connection, *, entity_type: str, name: str) -> int:
+    row = conn.execute(
+        "SELECT id FROM statuses WHERE entity_type = ? AND name = ? LIMIT 1",
+        (entity_type, name),
+    ).fetchone()
+    assert row is not None
+    return int(row["id"])
+
+
 def _insert_user(conn: sqlite3.Connection, *, user_id: int, login: str, role: str) -> None:
     conn.execute(
         "INSERT INTO users (id, login, full_name, role, is_active) VALUES (?, ?, ?, ?, ?)",
@@ -18,31 +27,31 @@ def _setup_task_context(conn: sqlite3.Connection) -> None:
     _insert_user(conn, user_id=22, login="owner", role="head")
     conn.execute(
         """
-        INSERT INTO pockets (id, name, date_start, date_end, status, owner_user_id, department)
+        INSERT INTO pockets (id, name, date_start, date_end, status_id, owner_user_id, department)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (300, "Pocket B", "2026-02-01", None, "Запущен", 20, "IT"),
+        (300, "Pocket B", "2026-02-01", None, _status_id(conn, entity_type="pocket", name="Запущен"), 20, "IT"),
     )
     conn.execute(
         """
-        INSERT INTO pockets (id, name, date_start, date_end, status, owner_user_id, department)
+        INSERT INTO pockets (id, name, date_start, date_end, status_id, owner_user_id, department)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (301, "Pocket C", "2026-02-01", None, "Запущен", 30, "IT"),
+        (301, "Pocket C", "2026-02-01", None, _status_id(conn, entity_type="pocket", name="Запущен"), 30, "IT"),
     )
     conn.execute(
         """
-        INSERT INTO projects (id, name, pocket_id, status, date_start, date_end, curator_business_user_id, curator_it_user_id)
+        INSERT INTO projects (id, name, pocket_id, status_id, date_start, date_end, curator_business_user_id, curator_it_user_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (400, "Project B", 300, "Активен", "2026-02-01", None, 20, 20),
+        (400, "Project B", 300, _status_id(conn, entity_type="project", name="Активен"), "2026-02-01", None, 20, 20),
     )
     conn.execute(
         """
-        INSERT INTO projects (id, name, pocket_id, status, date_start, date_end, curator_business_user_id, curator_it_user_id)
+        INSERT INTO projects (id, name, pocket_id, status_id, date_start, date_end, curator_business_user_id, curator_it_user_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (401, "Project C", 301, "Активен", "2026-02-01", None, 30, 30),
+        (401, "Project C", 301, _status_id(conn, entity_type="project", name="Активен"), "2026-02-01", None, 30, 30),
     )
     conn.commit()
 

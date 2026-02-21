@@ -8,6 +8,15 @@ STATUS_RUNNING = "Запущен"
 STATUS_DONE = "Завершён"
 
 
+def _status_id(conn: sqlite3.Connection, *, entity_type: str, name: str) -> int:
+    row = conn.execute(
+        "SELECT id FROM statuses WHERE entity_type = ? AND name = ? LIMIT 1",
+        (entity_type, name),
+    ).fetchone()
+    assert row is not None
+    return int(row["id"])
+
+
 def _insert_user(conn: sqlite3.Connection, *, user_id: int, login: str, role: str) -> None:
     conn.execute(
         "INSERT INTO users (id, login, full_name, role, is_active) VALUES (?, ?, ?, ?, ?)",
@@ -18,10 +27,18 @@ def _insert_user(conn: sqlite3.Connection, *, user_id: int, login: str, role: st
 def _insert_pocket(conn: sqlite3.Connection, *, pocket_id: int, owner_user_id: int) -> None:
     conn.execute(
         """
-        INSERT INTO pockets (id, name, date_start, date_end, status, owner_user_id, department)
+        INSERT INTO pockets (id, name, date_start, date_end, status_id, owner_user_id, department)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (pocket_id, "Pocket X", "2026-02-01", None, STATUS_RUNNING, owner_user_id, "IT"),
+        (
+            pocket_id,
+            "Pocket X",
+            "2026-02-01",
+            None,
+            _status_id(conn, entity_type="pocket", name=STATUS_RUNNING),
+            owner_user_id,
+            "IT",
+        ),
     )
 
 

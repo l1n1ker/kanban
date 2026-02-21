@@ -4,6 +4,15 @@ from __future__ import annotations
 import sqlite3
 
 
+def _status_id(conn: sqlite3.Connection, *, entity_type: str, name: str) -> int:
+    row = conn.execute(
+        "SELECT id FROM statuses WHERE entity_type = ? AND name = ? LIMIT 1",
+        (entity_type, name),
+    ).fetchone()
+    assert row is not None
+    return int(row["id"])
+
+
 def _insert_user(conn: sqlite3.Connection, *, user_id: int, login: str, role: str) -> None:
     conn.execute(
         "INSERT INTO users (id, login, full_name, role, is_active) VALUES (?, ?, ?, ?, ?)",
@@ -14,20 +23,37 @@ def _insert_user(conn: sqlite3.Connection, *, user_id: int, login: str, role: st
 def _insert_pocket(conn: sqlite3.Connection, *, pocket_id: int, owner_user_id: int) -> None:
     conn.execute(
         """
-        INSERT INTO pockets (id, name, date_start, date_end, status, owner_user_id, department)
+        INSERT INTO pockets (id, name, date_start, date_end, status_id, owner_user_id, department)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (pocket_id, "Pocket A", "2026-02-01", None, "Запущен", owner_user_id, "IT"),
+        (
+            pocket_id,
+            "Pocket A",
+            "2026-02-01",
+            None,
+            _status_id(conn, entity_type="pocket", name="Запущен"),
+            owner_user_id,
+            "IT",
+        ),
     )
 
 
 def _insert_project(conn: sqlite3.Connection, *, project_id: int, pocket_id: int, curator_user_id: int) -> None:
     conn.execute(
         """
-        INSERT INTO projects (id, name, pocket_id, status, date_start, date_end, curator_business_user_id, curator_it_user_id)
+        INSERT INTO projects (id, name, pocket_id, status_id, date_start, date_end, curator_business_user_id, curator_it_user_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (project_id, "Project A", pocket_id, "Активен", "2026-02-01", None, curator_user_id, curator_user_id),
+        (
+            project_id,
+            "Project A",
+            pocket_id,
+            _status_id(conn, entity_type="project", name="Активен"),
+            "2026-02-01",
+            None,
+            curator_user_id,
+            curator_user_id,
+        ),
     )
 
 
