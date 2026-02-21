@@ -40,6 +40,10 @@
   - compliance-тестов целевой нормы.
 - После прохождения переходного периода `Compat bridge` удаляется, норма становится строгой.
 
+Текущий статус bridge `status -> status_id` (зафиксировано 2026-02-21):
+- в хранении bridge закрыт: канон только `status_id`;
+- в HTTP API поле `status` временно оставлено как deprecated compatibility field на 1 релиз (derived from `status_id`).
+
 ## Состав
 
 ### 1. tasks_rules.md

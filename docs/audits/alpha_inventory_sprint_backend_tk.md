@@ -1,8 +1,8 @@
 # Alpha Inventory & Compliance Audit (Sprint Backend + Tkinter)
 
 Дата: 2026-02-21  
-Ветка: `feature/ui-v2`  
-Базовый коммит: `f2f24ce`  
+Ветка: `refactoring/alpha-hardening`  
+Базовый коммит: `2ad6011`  
 Принятый baseline истины: `md_docs/*` (strict)
 
 ## 1. Freeze snapshot
@@ -41,7 +41,9 @@
   - фильтрация list-операций поддерживает `status_id` приоритетно (`backend/repositories.py`, `backend/services.py`);
   - task lifecycle и WIP используют каноническое определение статуса через `status_id` (`backend/services.py`).
 - DB hardening:
-  - добавлена синхронизация legacy `status` с каноническим `status_id` и self-check обязательных системных статусов (`backend/db.py`).
+  - схема переведена на каноническое хранение `status_id` без legacy `status` колонок для новых БД;
+  - добавлен fail-fast self-check неконсистентности legacy `status/status_id` для старых БД;
+  - удалены legacy status tables из runtime-схемы (`backend/db.py`).
 - API hardening:
   - startup переведен с deprecated `on_event` на lifespan (`backend/http/app.py`).
 - Logging hardening:
@@ -65,20 +67,22 @@
 - Обновлена ссылка на UI-контракт в `md_docs/README.md`.
 - Обновлена матрица RBAC/Kanban под новую норму claim (`md_docs/test_matrix_rbac_kanban.md`).
 
-## 4. Compat bridge (осознанно оставлено)
+## 4. Compat bridge (статус на 2026-02-21)
 
-1. В схеме БД сохраняются legacy текстовые поля `status` для обратной совместимости.
-2. В API поле `status` оставлено как совместимое представление (derived from `status_id`), пока не завершен полный отказ от legacy-полей.
+1. На уровне хранения compat bridge закрыт: source of truth только `status_id`.
+2. В API сохраняется окно совместимости на 1 релиз:
+   - `status` в ответах остается как derived read-only поле;
+   - `status` во входных payload для pocket/project принимается как deprecated compat-input с нормализацией в `status_id`.
 
 ## 5. Risk register (P0/P1/P2)
 
 ### P0
 - Расхождение RBAC между backend и UI при дальнейших изменениях ролей.
-- Риск повторного рассогласования `status`/`status_id` при ручных SQL-операциях.
+- Риск неконсистентных данных в внешне модифицированных старых SQLite-базах (покрыт startup fail-fast).
 
 ### P1
-- Поддержка compat bridge (`status` + `status_id`) усложняет сопровождение.
-- Возможны дополнительные edge-cases в старых данных, где legacy статус неконсистентен.
+- Временное API-окно совместимости (`status` + `status_id`) усложняет сопровождение до sunset.
+- Возможны дополнительные edge-cases при импорте старых данных без миграционной дисциплины.
 
 ### P2
 - Техдолг по окончательному удалению legacy status tables/polей после окна совместимости.
@@ -98,8 +102,7 @@
 - Устранены deprecation-точки FastAPI startup и UTC timestamp.
 
 ### В compat bridge
-- Legacy `status` текстовые колонки остаются до отдельного migration-cleanup.
+- Только API-совместимость поля `status` (derived/deprecated) на 1 релиз.
 
 ### Отложено
-- Полное удаление legacy status tables/columns и cleanup миграций.
-- Формализация отдельного ADR по срокам отключения compat bridge.
+- Удаление API-поля `status` после завершения окна совместимости (следующий релиз после 2026-02-21).
