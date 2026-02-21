@@ -40,11 +40,16 @@ Branch: `refactoring/alpha-hardening`
 - Added shared helpers in `tests/helpers/`.
 - Added `tests/test_ui_import_smoke.py`.
 
+### UI main extraction closure
+- `ui_tk/main.py` reduced to compatibility entrypoint/bootstrap loader.
+- Full previous runtime implementation moved to `ui_tk/app_impl.py`.
+- Added module placeholders for remaining UI split steps: `ui_tk/views/analytics.py`, `ui_tk/views/shared.py`.
+
 ## Guardrails status
 - No runtime business-logic changes introduced intentionally.
 - API routes/payload semantics preserved.
 - `pytest -q --durations=10`: green after refactor.
 
 ## Open optimization debt
-- `ui_tk/main.py` remains oversized and should be decomposed functionally in follow-up iterations.
+- `ui_tk/app_impl.py` remains oversized and should be decomposed functionally into `views/ui/actions` in follow-up iterations.
 - Complexity thresholds (`<= 12`) require next pass with `radon` enforcement in CI.
