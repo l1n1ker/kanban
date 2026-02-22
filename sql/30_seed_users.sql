@@ -1,21 +1,20 @@
-PRAGMA foreign_keys = ON;
+﻿PRAGMA foreign_keys = ON;
 BEGIN TRANSACTION;
 
 INSERT INTO users (id, login, full_name, role, is_active, status_id) VALUES
-(1, 'mozzy', 'Mozzy Admin', 'admin', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(2, 'head_1', 'Head One', 'head', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(3, 'curator_1', 'Curator One', 'curator', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(4, 'curator_2', 'Curator Two', 'curator', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(5, 'curator_3', 'Curator Three', 'curator', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(6, 'exec_01', 'Executor 01', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(7, 'exec_02', 'Executor 02', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(8, 'exec_03', 'Executor 03', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(9, 'exec_04', 'Executor 04', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(10, 'exec_05', 'Executor 05', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(11, 'exec_06', 'Executor 06', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(12, 'exec_07', 'Executor 07', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(13, 'exec_08', 'Executor 08', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(14, 'exec_09', 'Executor 09', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1)),
-(15, 'exec_10', 'Executor 10', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND name='Активен' LIMIT 1));
+(1, 'mozzy', 'Иванов Степан Иванович', 'admin', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(2, 'head_farm', 'Соколов Андрей Петрович', 'head', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(3, 'lead_build', 'Кузнецов Олег Сергеевич', 'teamlead', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(4, 'curator_garden', 'Петрова Василиса Васильевна', 'curator', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(5, 'curator_house', 'Смирнов Максим Игоревич', 'curator', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(6, 'curator_livestock', 'Орлова Наталья Дмитриевна', 'curator', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(7, 'exec_soil', 'Грачев Николай Артемович', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(8, 'exec_irrigation', 'Морозова Елена Викторовна', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(9, 'exec_mason', 'Федоров Павел Андреевич', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(10, 'exec_roof', 'Волкова Мария Константиновна', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(11, 'exec_vet', 'Лебедев Илья Романович', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(12, 'exec_feed', 'Зайцева Анна Валерьевна', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(13, 'exec_general', 'Белов Кирилл Олегович', 'executor', 1, (SELECT id FROM statuses WHERE entity_type='user' AND code='active' LIMIT 1)),
+(14, 'archived_worker', 'Тихонова Ольга Сергеевна', 'executor', 0, (SELECT id FROM statuses WHERE entity_type='user' AND code='inactive' LIMIT 1));
 
 COMMIT;
