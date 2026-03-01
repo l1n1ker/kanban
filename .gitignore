@@ -3,6 +3,7 @@
 *.pyo
 *.sqlite3
 *.db
+!kanban.db
 .env
 .venv/
 venv/
